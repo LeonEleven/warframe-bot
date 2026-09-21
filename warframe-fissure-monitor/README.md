@@ -281,6 +281,7 @@ Get-Content .\logs\monitor.log -Encoding UTF8 -Tail 20 -Wait
 
 ### 5.6 卸载
 
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-scheduled-task.ps1
 ```
@@ -360,11 +361,24 @@ Monitor **不会主动等待 NapCat ready**（没有这类业务逻辑，也不�
 - 无匹配裂缝 → `debug`（避免 60 秒一条的噪音）。
 - 发现新的待通知裂缝 → `info`；QQ 发送成功 → `info`。
 - provider 回退 → `warn`；HTTP / 解析异常 → `error`。
-- **心跳**：默认每 6 小时一条 `info`：
-  `监控运行正常 provider=official 累计轮询=57 最近成功获取=2026-09-21T02:00:00.000Z 最近一次裂缝数量=30`
+- **日志时间使用运行 Monitor 的 Windows 系统当前时区**（`YYYY-MM-DDTHH:mm:ss.SSS±HH:mm`）。
+  例如系统位于 UTC+8：
+
+  ```
+  [2026-09-21T15:20:06.467+08:00] INFO  Warframe 裂缝监控启动 ...
+  ```
+
+  其中 `+08:00` 是该时刻系统实际生效的 UTC offset（若系统启用夏令时，会自动使用当时的 offset，
+  例如 `-04:00`）。不会硬编码时区，也不需要任何时区配置项。
+- **心跳**：默认每 6 小时一条 `info`（时间同样使用系统本地时区，与该行日志前缀一致）：
+  `监控运行正常 provider=official 累计轮询=57 最近成功获取=2026-09-21T15:00:00.000+08:00 最近一次裂缝数量=30`
   心跳**只写日志，绝不发送 QQ**。
   `最近成功获取` 只表示「Warframe 数据获取成功」，与 QQ 是否发送成功无关：
   NapCat 发送失败会记 `error` 日志并在下一轮重试，但不会把这一轮算成「获取失败」。
+- **机器数据仍然是 UTC/ISO，不受日志显示方式影响**：
+  `data/monitor.lock` 的 `startedAt`、`data/state.json` 的时间、Warframe API 的 activation/expiry
+  等一律保持 UTC ISO（例如 `2026-09-21T07:20:06.467Z`）——它们要参与过期判断与 PID 身份校验，
+  只有「给人看的日志」才用本地时区。
 - **parser 噪音**：`warframe-worldstate-parser` 默认会把
   `No defined kuva data, skipping data` / `No outpost data, skipping` 直接输出到 `console.debug`。
   本项目已通过 parser 官方的 logger 注入点把这类信息转成 `[worldstate-parser]` 前缀的 `debug` 日志，
@@ -378,7 +392,7 @@ Monitor **不会主动等待 NapCat ready**（没有这类业务逻辑，也不�
 | 写入方 | 内容 | 编码 |
 |---|---|---|
 | `run-monitor.cmd` | `[run-monitor] ===== START =====`、`===== EXIT code=N =====` | **纯 ASCII**（刻意不含日期时间与中文字符） |
-| Node logger | 监控日志（含中文文案与 ISO 时间戳） | **UTF-8** |
+| Node logger | 监控日志（含中文文案，时间戳为**系统本地时区**） | **UTF-8** |
 
 cmd 写入的那几行是纯 ASCII，UTF-8 与本地代码页对它们的字节解释完全一致，所以整个文件不会再出现混合编码乱码；
 所有中文都来自 Node，始终是 UTF-8。时间戳也统一由 Node logger 输出，cmd 不再生成本地化时间。
@@ -488,6 +502,11 @@ warframe-fissure-monitor/
   命令行必须指向本项目 `dist\index.js`（覆盖绝对/相对写法、`/` 与 `\`、大小写、空格与引号；
   拒绝 `dist\index.js.bak`、别的项目的 `dist\index.js` 与无关进程）；
   启动时间必须与 `lock.startedAt` 一致（±9 秒通过、±11 秒与明显不同则拒绝、无法解析也拒绝）
+- **日志时间格式化**（`tests/time.test.ts`，15 个用例）：offset 符号方向（`-480 → +08:00`、`300 → -05:00`）、
+  毫秒始终三位、往返解析回同一瞬时（证明符号正确且与机器时区无关）、不修改传入 Date、
+  以及用 `TZ` 启动子进程的确定性验证（Asia/Shanghai → `+08:00`；America/New_York 冬 `-05:00` / 夏 `-04:00`
+  自动应用 DST；UTC → `+00:00` 而不是 `Z`），并断言 logger/heartbeat 不再使用 `toISOString`、
+  而 `lock.ts` / `state/store.ts` / `mapping.ts` 仍保持 UTC ISO
 - **`run-monitor.cmd` 守护**（`tests/run-monitor-cmd.test.ts`，10 个用例）：ASCII-only / CRLF / 无 `%DATE%`、`%TIME%` / 无绝对路径 / 无凭据
 
 ---

@@ -10,6 +10,7 @@ import { applyPollOutcome, createMonitorStats, formatHeartbeat, Heartbeat } from
 import type { NapCatSendResult } from '../src/notify/napcat.js';
 import { runPollCycle } from '../src/poller.js';
 import { StateStore } from '../src/state/store.js';
+import { formatLocalTimestamp } from '../src/time.js';
 import { createMemoryLogger, makeFissure, withTempDir } from './helpers.js';
 
 const SIX_HOURS = 6 * 60 * 60 * 1000;
@@ -84,19 +85,30 @@ test('未到间隔不输出，到达间隔输出一次', () => {
 
 test('心跳文本包含 provider / 累计轮询 / 最近成功获取 / 最近一次裂缝数量', () => {
   const stats = createMonitorStats('official');
+  const successAt = new Date('2026-09-21T00:59:48.000Z');
+  const errorAt = new Date('2026-09-21T01:30:00.000Z');
   stats.cycles = 57;
-  stats.lastSuccessAt = new Date('2026-09-21T00:59:48.000Z');
+  stats.lastSuccessAt = successAt;
   stats.lastFissureCount = 30;
-  stats.lastErrorAt = new Date('2026-09-21T01:30:00.000Z');
+  stats.lastErrorAt = errorAt;
 
   const text = formatHeartbeat(stats);
 
   assert.match(text, /^监控运行正常 /);
   assert.match(text, /provider=official/);
   assert.match(text, /累计轮询=57/);
-  assert.match(text, /最近成功获取=2026-09-21T00:59:48\.000Z/);
   assert.match(text, /最近一次裂缝数量=30/);
-  assert.match(text, /最近一次错误=2026-09-21T01:30:00\.000Z/);
+  // 时间使用运行机器的本地时区（与日志前缀一致），因此用同一个 formatter 计算期望值，避免依赖 CI 机器时区
+  assert.ok(
+    text.includes(`最近成功获取=${formatLocalTimestamp(successAt)}`),
+    `最近成功获取应为本地时间格式，实际：${text}`,
+  );
+  assert.ok(
+    text.includes(`最近一次错误=${formatLocalTimestamp(errorAt)}`),
+    `最近一次错误应为本地时间格式，实际：${text}`,
+  );
+  assert.ok(!text.includes('Z'), '心跳文本不得再出现 UTC 的 Z 后缀');
+  assert.match(text, /最近成功获取=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}/);
 });
 
 test('从未成功获取时心跳仍然可读', () => {

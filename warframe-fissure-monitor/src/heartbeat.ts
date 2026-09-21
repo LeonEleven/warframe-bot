@@ -4,10 +4,12 @@
  * 长期运行时用来确认「程序还活着、数据还在更新」，默认每 6 小时输出一条 info。
  *
  * 设计约束：心跳**只写日志**，它甚至没有 NapCat 的任何依赖（结构上不可能发 QQ 消息）。
+ * 心跳文本里的时间使用运行机器的本地时区（与该行日志前缀一致），见 src/time.ts。
  */
 
 import type { Logger } from './logger.js';
 import type { PollOutcome } from './poller.js';
+import { formatLocalTimestamp } from './time.js';
 
 export interface MonitorStats {
   /** 实际生效的 provider 名（auto 模式下可能回退） */
@@ -59,11 +61,13 @@ export function formatHeartbeat(stats: MonitorStats): string {
     '监控运行正常',
     `provider=${stats.provider}`,
     `累计轮询=${stats.cycles}`,
-    `最近成功获取=${stats.lastSuccessAt === null ? '从未' : stats.lastSuccessAt.toISOString()}`,
+    // 面向人的日志时间使用本地时区，与该行日志前缀保持一致；
+    // 机器数据（monitor.lock / state.json）仍然保持 UTC ISO，见 src/time.ts。
+    `最近成功获取=${stats.lastSuccessAt === null ? '从未' : formatLocalTimestamp(stats.lastSuccessAt)}`,
     `最近一次裂缝数量=${stats.lastFissureCount === null ? '未知' : stats.lastFissureCount}`,
   ];
   if (stats.lastErrorAt !== null) {
-    parts.push(`最近一次错误=${stats.lastErrorAt.toISOString()}`);
+    parts.push(`最近一次错误=${formatLocalTimestamp(stats.lastErrorAt)}`);
   }
   return parts.join(' ');
 }

@@ -2,7 +2,10 @@
  * 极简结构化日志。
  * - info/debug 输出到 stdout，warn/error 输出到 stderr
  * - 只依赖 Node 内置能力，方便在测试里替换成内存 logger
+ * - 日志时间使用运行机器的本地时区，见 src/time.ts
  */
+
+import { formatLocalTimestamp } from './time.js';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -42,7 +45,9 @@ export function describeError(error: unknown): string {
 }
 
 function writeLine(stream: NodeJS.WriteStream, level: LogLevel, message: string, meta?: unknown): void {
-  const timestamp = new Date().toISOString();
+  // 面向人的日志时间使用运行机器的本地时区（YYYY-MM-DDTHH:mm:ss.SSS±HH:mm）。
+  // 机器数据（monitor.lock / state.json / API 时间）仍然保持 UTC ISO，见 src/time.ts 说明。
+  const timestamp = formatLocalTimestamp(new Date());
   const suffix = meta === undefined ? '' : ` ${toText(meta)}`;
   stream.write(`[${timestamp}] ${level.toUpperCase().padEnd(5, ' ')} ${message}${suffix}\n`);
 }
