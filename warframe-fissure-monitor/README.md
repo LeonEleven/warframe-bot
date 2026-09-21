@@ -177,6 +177,9 @@ Get-Item "$env:TEMP\wf-worldstate.json" | Select-Object Length
 | `npm run check` | **真实调用** Warframe 数据源，打印 provider / 数量 / 匹配项开发者信息 / 消息预览；**绝不发送 QQ，也不修改 notified state** |
 | `npm run test:notification` | 构造假裂缝（Mot (Void) / Survival / Axi / isHard=true）通过真实 NapCat 发给 `TARGET_QQ`；不写 `state.json` |
 
+> 长期部署（Windows 计划任务）用的是 `scripts\` 下的 4 个脚本，不是 npm 命令，见 [第 5 节](#5-正式运行windows-长期部署)：
+> `install-scheduled-task.ps1` / `status-scheduled-task.ps1` / `uninstall-scheduled-task.ps1`（+ 被任务调用的 `run-monitor.cmd`）。
+
 ### `npm run check` 会打印什么
 
 ```
@@ -203,26 +206,111 @@ Steel Path 数量   : 12
 
 ---
 
-## 5. 正式运行
+## 5. 正式运行（Windows 长期部署）
+
+### 5.1 首次准备
 
 ```powershell
 npm run typecheck
 npm test
 npm run build
-
-npm start                       # 手工前台运行
-scripts\run-monitor.cmd         # 或用启动脚本（自动写 logs\monitor.log）
 ```
 
-### Windows 任务计划程序（推荐）
+### 5.2 安装「登录自动启动」计划任务（推荐）
 
-1. 触发器：**用户登录时**，建议延迟 **30~60 秒**（等网络与 NapCat 就绪）。
-2. 操作：程序填 `scripts\run-monitor.cmd` 的完整路径，起始于项目根目录。
-3. 设置：
-   - **如果任务已在运行，则不启动新实例**（配合程序自身的单实例锁双保险）
-   - **任务失败后：1 分钟后重新启动**
-   - **不要**勾选"运行超过 N 天自动停止"
-4. `scripts\run-monitor.cmd` 会自动 `cd` 到项目根目录、创建 `logs\`、把 stdout/stderr 追加写入 `logs\monitor.log`；脚本内**不含任何 QQ 号 / token / 代理密码**（全部来自 `.env`）。
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-scheduled-task.ps1
+```
+
+脚本会创建一个名为 **`Warframe Fissure Monitor`** 的计划任务：
+
+| 项目 | 值 |
+|---|---|
+| 触发器 | **用户登录时**（仅当前用户），**延迟 60 秒**（Task Scheduler 原生 Trigger Delay，不是脚本里的 sleep） |
+| 运行身份 | 当前登录用户（`Interactive` = 仅在用户登录时运行），`Limited` 普通权限，**不需要管理员、不保存密码、不使用 SYSTEM** |
+| 执行程序 | `%SystemRoot%\System32\cmd.exe`，参数 `/d /c ""<项目根>\scripts\run-monitor.cmd""`，工作目录为项目根 |
+| 多实例策略 | **IgnoreNew**（任务已运行时不启动第二个实例；项目内 PID lock 为第二层保护） |
+| 执行时限 | **PT0S = 无限制**（不会因为「运行超过 3 天」被停止） |
+| 失败重启 | 每 **1 分钟**，最多 **3** 次（`run-monitor.cmd` 会把 Node 退出码返回给调用方，Task Scheduler 据此判定失败） |
+| 电池策略 | 允许电池供电时启动；切换到电池**不停止** |
+| 其他 | `StartWhenAvailable=true`（错过启动机会可补启）；不要求空闲、不依赖网络配置与电源模式 |
+
+安装脚本是**幂等**的：重复执行只会把同名任务更新为当前项目配置，不会产生第二个任务，也不会启动第二个 Monitor。
+安装前会检查 `scripts\run-monitor.cmd`、`dist\index.js`（缺失会直接报错并提示 `npm run build`；不会静默创建一个必然失败的任务）、`.env` 是否存在（不存在只警告，因为配置也可以来自系统环境变量）、以及 `node` 是否可用（并打印解析到的 `node.exe` 路径，便于排查计划任务的 PATH 问题）。脚本不会读取或打印 `.env` 中的任何内容。
+
+想先预览不注册：加 `-DryRun`。
+
+### 5.3 查看状态
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\status-scheduled-task.ps1
+```
+
+只读输出：任务是否存在、`State`、`LastRunTime`、`LastTaskResult`、`NextRunTime`、触发器/用户/动作、关键设置；项目侧会读取 `data\monitor.lock` 的 PID 并判断进程是否存活（`running` / `stale`，只报告不删除），以及 `logs\monitor.log` 的大小与最后写入时间（不打印日志内容）。
+
+### 5.4 手动启动测试
+
+```powershell
+Start-ScheduledTask -TaskName "Warframe Fissure Monitor"
+```
+
+手工启动**不需要**等 60 秒 —— `Delay` 只属于登录触发器。
+
+### 5.5 查看日志
+
+```powershell
+# Windows PowerShell 5.1：显式指定 UTF8，避免中文显示为乱码
+Get-Content .\logs\monitor.log -Encoding UTF8 -Tail 50
+
+# 实时跟踪
+Get-Content .\logs\monitor.log -Encoding UTF8 -Tail 20 -Wait
+```
+
+### 5.6 卸载
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-scheduled-task.ps1
+```
+
+- 默认**不删除任何项目文件**（`.env` / `data\state.json` / `data\monitor.lock` / `logs\` / `dist\` / `node_modules\` 全部保留），也**不会**强杀 Monitor 进程。
+- 任务不存在时只提示「任务不存在，无需删除。」并以 0 退出（幂等）。
+- **重要（实测结论）**：任务的 action 是 `cmd.exe /d /c run-monitor.cmd`，`run-monitor.cmd` 再启动 `node`。
+  `Stop-ScheduledTask` 结束的是 action 进程 `cmd.exe`，**Windows 不会连带结束子进程**，因此卸载后 `node.exe` 可能仍在运行（Monitor 仍在轮询、仍具备发送通知的能力）。
+  「任务已停止」≠「Monitor 已停止」。需要彻底停止时加开关：
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-scheduled-task.ps1 -StopMonitorProcess
+  ```
+
+  该开关会强制结束残留的 Monitor（Node 来不及执行退出清理，`data\monitor.lock` 会留下 stale，下次启动时由项目自身自动清理）。
+  即使残留了 monitor，安全性也有保障：重新启动任务时 Task Scheduler 的 `IgnoreNew` 与项目内 PID lock 都会拒绝第二个实例。
+
+### 5.7 启动顺序说明
+
+```
+Windows 用户登录
+    ↓
+NapCatQQ-Desktop 自启动
+    ↓
+NapCat 自动拉起 Bot
+    ↓
+约 60 秒后，Task Scheduler 启动 Monitor（scripts\run-monitor.cmd → node dist\index.js）
+```
+
+Monitor **不会主动等待 NapCat ready**（没有这类业务逻辑，也不需要）：
+
+- 只有真正需要发通知时才会调用 NapCat；
+- 如果目标裂缝出现时 NapCat 还不可用：发送失败 → **不写 `state.json`** → 下一轮（60 秒后）会重新尝试；
+- 因此即使 Monitor 比 NapCat 早启动，也不会永久漏掉裂缝；
+- 登录后延迟 60 秒的目的只是降低启动竞态与无意义的错误日志。
+
+### 5.8 备用手工方法：任务计划程序 GUI
+
+不想用脚本时，可以手工创建（与上面脚本等价）：
+
+1. 触发器：**用户登录时**，延迟 **60 秒**。
+2. 操作：程序 `cmd.exe`，参数 `/d /c "<项目根>\scripts\run-monitor.cmd"`，起始于项目根目录。
+3. 设置：**如果任务已在运行，则不启动新实例**；**任务失败后：1 分钟后重新启动**；**不要**勾选"运行超过 N 天自动停止"；勾选"不管用户是否登录都运行"**不要**勾，勾选"使用电池供电时**允许**启动/不停止"。
 
 > **`scripts\run-monitor.cmd` 故意保持 ASCII-only**（纯英文注释与 echo、CRLF 换行、不使用 `%DATE%` / `%TIME%`）。
 > 原因：传统 Windows `cmd.exe` 按**系统本地代码页**解析批处理文件，脚本里出现 UTF-8 中文时会报出
@@ -230,6 +318,9 @@ scripts\run-monitor.cmd         # 或用启动脚本（自动写 logs\monitor.lo
 > 「周一」这类本地化文本，与 Node 写出的 UTF-8 日志混在同一个文件里造成混合编码。
 > 因此**不要**给这个脚本加中文注释、中文 echo 或本地化日期时间；时间戳统一由 Node logger 输出。
 > `tests/run-monitor-cmd.test.ts` 会守护这条约束（ASCII-only / CRLF / 无 `%DATE%` / 无绝对路径 / 无凭据）。
+>
+> 计划任务脚本本身（`scripts\*.ps1`）使用中文提示，因此保存为 **UTF-8 with BOM + CRLF**，
+> 这样 Windows PowerShell 5.1 才能正确解析中文；`tests/scheduled-task-scripts.test.ts` 会守护这些约束。
 
 关于唤醒：
 
@@ -314,7 +405,11 @@ Get-Content .\logs\monitor.log -Encoding UTF8 -Tail 20 -Wait
 
 ```
 warframe-fissure-monitor/
-├─ scripts/run-monitor.cmd        # 任务计划程序用启动脚本（无敏感信息）
+├─ scripts/
+│  ├─ run-monitor.cmd                 # 计划任务启动脚本（ASCII-only + CRLF，无敏感信息）
+│  ├─ install-scheduled-task.ps1      # 安装「登录后延迟 60 秒」计划任务（幂等，支持 -DryRun）
+│  ├─ status-scheduled-task.ps1       # 只读状态检查（任务 + lock/PID + 日志大小）
+│  └─ uninstall-scheduled-task.ps1    # 删除任务（默认不删文件、不强杀；-StopMonitorProcess 可选）
 ├─ data/                          # state.json + monitor.lock（运行时生成，已 gitignore）
 ├─ logs/                          # run-monitor.cmd 的日志（已 gitignore）
 ├─ src/
@@ -338,7 +433,7 @@ warframe-fissure-monitor/
 │  │  ├─ http.ts  proxy.ts        # 内置超时 + 可选 undici ProxyAgent
 │  │  └─ defaults.ts
 │  └─ scripts/{check,test-notification}.ts
-└─ tests/                         # 133 个用例（含最小 WorldState fixture）
+└─ tests/                         # 164 个用例（含最小 WorldState fixture 与部署脚本守护测试）
    └─ fixtures/worldstate.fissures.json
 ```
 
@@ -346,7 +441,7 @@ warframe-fissure-monitor/
 
 ## 8. 测试覆盖
 
-`npm test`（133 个用例，全部离线、不需要真实 .env / NapCat / QQ / Warframe API / 代理）：
+`npm test`（164 个用例，全部离线、不需要真实 .env / NapCat / QQ / Warframe API / 代理 / 计划任务）：
 
 - 匹配规则：5 个条件的正例与各种反例（含 `isHard`/`isStorm` 为 unknown 时不匹配）
 - **Official provider**：从保存的最小 WorldState fixture 解析、`Hard=true → isHard=true`、`ActiveMissionTier → isStorm=true`、普通裂缝 `isStorm=false`、请求失败 / HTTP 500 / HTML 拦截 / 缺少字段 / 单条脏数据只跳过该条
@@ -359,6 +454,12 @@ warframe-fissure-monitor/
 - **心跳**：间隔控制与内容，反复触发心跳**绝不调用 NapCat**
 - **代理隔离**：启用代理时 Warframe 请求带 dispatcher、NapCat 请求绝无 dispatcher；日志与配置描述不含代理凭据
 - 长期运行：顺序轮询不重叠、单轮异常不终止循环
+- **计划任务脚本静态守护**（`tests/scheduled-task-scripts.test.ts`，12 个用例）：三个脚本同名任务、
+  原生 `PT60S` 延迟（禁止 sleep/timeout 模拟）、`IgnoreNew`、`PT0S` 无限执行时限、`PT1M×3` 失败重启、
+  电池/空闲/网络策略、当前用户 + `Interactive` + `Limited`（禁止 SYSTEM / 密码）、action 指向
+  `run-monitor.cmd` 且工作目录为项目根、status 只读、uninstall 默认不强杀且不删文件、无硬编码用户路径与凭据、
+  UTF-8 with BOM + CRLF
+- **`run-monitor.cmd` 守护**（`tests/run-monitor-cmd.test.ts`，10 个用例）：ASCII-only / CRLF / 无 `%DATE%`、`%TIME%` / 无绝对路径 / 无凭据
 
 ---
 
@@ -382,4 +483,10 @@ CI **不读取真实 `.env`，不需要 `TARGET_QQ` / `NAPCAT_TOKEN`，不调用
 | 想先观察不发送 | `$env:DRY_RUN='true'; npm start`（日志会打印本应发送的完整消息）。 |
 | 日志文件在哪 | `logs\monitor.log`（用 `scripts\run-monitor.cmd` 启动时）；前台运行则直接输出到控制台。 |
 | 运行 `scripts\run-monitor.cmd` 报 `'嬪簭璋冪敤锛?rem' 不是内部或外部命令` 之类乱码 | 说明批处理文件里被写入了非 ASCII 字符。`run-monitor.cmd` 必须保持 ASCII-only + CRLF，不要添加中文注释/echo；先跑 `npm test`（`tests/run-monitor-cmd.test.ts` 会指出问题）。 |
+| 任务 State 显示 `Running`，但日志不再更新 | 用 `status-scheduled-task.ps1` 看 `data\monitor.lock` 的 PID 是否存活。若 Monitor 已死而任务仍显示 Running，重启任务：`Stop-ScheduledTask -TaskName "Warframe Fissure Monitor"; Start-ScheduledTask -TaskName "Warframe Fissure Monitor"`。 |
+| 任务 `LastTaskResult` = `2147946720`（0x800710E0） | 正常现象：任务已在运行，多实例策略 `IgnoreNew` 拒绝了这次启动（不会产生第二个 Monitor）。 |
+| 卸载后 Monitor 仍在运行 / `npm start` 提示已有实例 | 见 5.6：`Stop-ScheduledTask` 不会结束 `node` 子进程。用 `uninstall-scheduled-task.ps1 -StopMonitorProcess`，或按 `data\monitor.lock` 里的 PID 手工 `Stop-Process -Id <PID>`。 |
+| 登录后任务没有自动启动 | 确认任务 State 为 `Ready` 且触发器用户是当前用户（`status-scheduled-task.ps1`）；`StartWhenAvailable` 会在条件恢复后补启动。也可以手工 `Start-ScheduledTask` 立即验证。 |
+| 计划任务里 `node` 找不到 / 立即失败 | 计划任务使用登录用户的环境变量。`install-scheduled-task.ps1` 会打印它解析到的 `node.exe` 路径；请确认该路径来自持久化的用户/系统 PATH（脚本不会修改 PATH）。 |
+| 改了 `.env` 后想马上生效 | 重启任务：`Stop-ScheduledTask -TaskName "Warframe Fissure Monitor"; Start-ScheduledTask -TaskName "Warframe Fissure Monitor"`，然后用 `-StopMonitorProcess` 或 `Stop-Process` 结束可能残留的旧 Monitor。 |
 | 接口字段变了 | 解析层已做兼容（`missionTypeKey ?? missionKey ?? missionType`、`nodeKey ?? node`、unknown 保持 null），单条脏数据只跳过该条并记 `warn` 日志。 |

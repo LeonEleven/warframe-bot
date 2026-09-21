@@ -2,6 +2,11 @@
 *.cmd text eol=crlf
 *.bat text eol=crlf
 
+# PowerShell 部署脚本同样按 Windows 习惯使用 CRLF
+# （脚本文件保存为 UTF-8 with BOM，以便 Windows PowerShell 5.1 正确解析中文；
+#   git 只规范化换行，不会改动 BOM 等文件内容）
+*.ps1 text eol=crlf
+
 # 其余文本文件统一用 LF 存储
 *.ts  text eol=lf
 *.json text eol=lf
