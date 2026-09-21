@@ -246,7 +246,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-scheduled-task.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\status-scheduled-task.ps1
 ```
 
-只读输出：任务是否存在、`State`、`LastRunTime`、`LastTaskResult`、`NextRunTime`、触发器/用户/动作、关键设置；项目侧会读取 `data\monitor.lock` 的 PID 并判断进程是否存活（`running` / `stale`，只报告不删除），以及 `logs\monitor.log` 的大小与最后写入时间（不打印日志内容）。
+只读输出：任务是否存在、`State`、`LastRunTime`、`LastTaskResult`、`NextRunTime`、触发器/用户/动作、关键设置；项目侧会读取 `data\monitor.lock` 的 PID 并**校验它是否确实属于本项目 Monitor**，以及 `logs\monitor.log` 的大小与最后写入时间（不打印日志内容）。
+
+`data\monitor.lock` 的判定有三种结果（**不再只看 PID 是否存在**）：
+
+| 输出 | 含义 |
+|---|---|
+| `Monitor lock : stale` | PID 已不存在（Monitor 已退出），下次启动时由项目自身清理 |
+| `Monitor process : running (verified)` + `Identity : verified` | PID 存在，且进程名是 `node`、命令行指向本项目 `dist\index.js`、进程启动时间与 `lock.startedAt` 一致（容忍 10 秒） |
+| `Monitor lock : suspicious / unverified` | PID 存在但无法确认属于本项目 —— **很可能是 Windows 把该 PID 重用给了别的程序**；脚本只报告，不会结束该进程，也不会删除 lock |
+
+> 为什么要做身份校验：`monitor.lock` 里只有 `pid` 与 `startedAt`，而 Windows 的 PID 会被重复使用。
+> 如果 Monitor 异常退出留下 stale lock、原 PID 又恰好被别的程序占用，只看「PID 存在」就会把无关进程当成 Monitor。
+> 因此 `status` 与 `uninstall` 都会调用 `scripts/scheduled-task-common.ps1` 中的
+> `Get-MonitorProcessIdentity`（基于 `Get-CimInstance Win32_Process`，不使用已弃用的 `wmic`）做三重校验。
 
 ### 5.4 手动启动测试
 
@@ -282,7 +295,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-scheduled-task.ps1
   powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-scheduled-task.ps1 -StopMonitorProcess
   ```
 
-  该开关会强制结束残留的 Monitor（Node 来不及执行退出清理，`data\monitor.lock` 会留下 stale，下次启动时由项目自身自动清理）。
+  **`-StopMonitorProcess` 不会只看 PID，它会先做身份校验**（`scripts/scheduled-task-common.ps1`）：
+
+  1. `data\monitor.lock` 的 PID 只是第一步 —— 单凭它**不足以**认定该进程属于本项目；
+  2. 必须同时满足：进程名是 `node`；命令行（`Get-CimInstance Win32_Process` 的 `CommandLine`）指向本项目的 `dist\index.js`；进程启动时间与 `lock.startedAt` 一致（容忍 10 秒）；
+  3. 只有三项全部通过（`verified`）才会执行 `Stop-Process`；
+  4. **任何一项无法确认就拒绝强杀**，打印拒绝原因并以退出码 1 结束，交由人工确认 —— 这是为了防止 Windows 的 PID 重用导致误结束无关进程（宁可留下一个进程让你检查，也不能杀错）；
+  5. 路径判断基于脚本动态定位的项目根目录，不硬编码任何用户路径；对大小写、`\` 与 `/`、空格、引号、以及绝对/相对两种写法都做了处理。
+
+  强制停止时 Node 来不及执行退出清理，`data\monitor.lock` 会留下 stale，下次启动时由项目自身自动清理。
   即使残留了 monitor，安全性也有保障：重新启动任务时 Task Scheduler 的 `IgnoreNew` 与项目内 PID lock 都会拒绝第二个实例。
 
 ### 5.7 启动顺序说明
@@ -407,9 +428,10 @@ Get-Content .\logs\monitor.log -Encoding UTF8 -Tail 20 -Wait
 warframe-fissure-monitor/
 ├─ scripts/
 │  ├─ run-monitor.cmd                 # 计划任务启动脚本（ASCII-only + CRLF，无敏感信息）
+│  ├─ scheduled-task-common.ps1       # 公共 helper：Monitor 进程身份校验（PID/进程名/命令行/启动时间）
 │  ├─ install-scheduled-task.ps1      # 安装「登录后延迟 60 秒」计划任务（幂等，支持 -DryRun）
-│  ├─ status-scheduled-task.ps1       # 只读状态检查（任务 + lock/PID + 日志大小）
-│  └─ uninstall-scheduled-task.ps1    # 删除任务（默认不删文件、不强杀；-StopMonitorProcess 可选）
+│  ├─ status-scheduled-task.ps1       # 只读状态检查（任务 + 身份校验后的 lock/PID + 日志大小）
+│  └─ uninstall-scheduled-task.ps1    # 删除任务（默认不删文件、不强杀；-StopMonitorProcess 需通过身份校验）
 ├─ data/                          # state.json + monitor.lock（运行时生成，已 gitignore）
 ├─ logs/                          # run-monitor.cmd 的日志（已 gitignore）
 ├─ src/
@@ -433,7 +455,7 @@ warframe-fissure-monitor/
 │  │  ├─ http.ts  proxy.ts        # 内置超时 + 可选 undici ProxyAgent
 │  │  └─ defaults.ts
 │  └─ scripts/{check,test-notification}.ts
-└─ tests/                         # 164 个用例（含最小 WorldState fixture 与部署脚本守护测试）
+└─ tests/                         # 171 个用例（含最小 WorldState fixture 与部署脚本守护/行为测试）
    └─ fixtures/worldstate.fissures.json
 ```
 
@@ -441,7 +463,7 @@ warframe-fissure-monitor/
 
 ## 8. 测试覆盖
 
-`npm test`（164 个用例，全部离线、不需要真实 .env / NapCat / QQ / Warframe API / 代理 / 计划任务）：
+`npm test`（171 个用例，全部离线、不需要真实 .env / NapCat / QQ / Warframe API / 代理 / 计划任务）：
 
 - 匹配规则：5 个条件的正例与各种反例（含 `isHard`/`isStorm` 为 unknown 时不匹配）
 - **Official provider**：从保存的最小 WorldState fixture 解析、`Hard=true → isHard=true`、`ActiveMissionTier → isStorm=true`、普通裂缝 `isStorm=false`、请求失败 / HTTP 500 / HTML 拦截 / 缺少字段 / 单条脏数据只跳过该条
@@ -454,11 +476,18 @@ warframe-fissure-monitor/
 - **心跳**：间隔控制与内容，反复触发心跳**绝不调用 NapCat**
 - **代理隔离**：启用代理时 Warframe 请求带 dispatcher、NapCat 请求绝无 dispatcher；日志与配置描述不含代理凭据
 - 长期运行：顺序轮询不重叠、单轮异常不终止循环
-- **计划任务脚本静态守护**（`tests/scheduled-task-scripts.test.ts`，12 个用例）：三个脚本同名任务、
+- **计划任务脚本静态守护**（`tests/scheduled-task-scripts.test.ts`，15 个用例）：四个脚本同名任务、
   原生 `PT60S` 延迟（禁止 sleep/timeout 模拟）、`IgnoreNew`、`PT0S` 无限执行时限、`PT1M×3` 失败重启、
   电池/空闲/网络策略、当前用户 + `Interactive` + `Limited`（禁止 SYSTEM / 密码）、action 指向
-  `run-monitor.cmd` 且工作目录为项目根、status 只读、uninstall 默认不强杀且不删文件、无硬编码用户路径与凭据、
-  UTF-8 with BOM + CRLF
+  `run-monitor.cmd` 且工作目录为项目根、status 只读且必须走身份校验、uninstall 默认不强杀且不删文件、
+  **`Stop-Process` 只允许出现在「身份未通过就 return」与「默认不 kill 就 return」两个 guard 之后**、
+  无硬编码用户路径与凭据、UTF-8 with BOM + CRLF
+- **进程身份校验行为测试**（`tests/monitor-identity-logic.test.ts`，4 组共 26 个用例）：
+  真实执行 PowerShell 并 dot-source `scheduled-task-common.ps1`，直接验证判断逻辑 ——
+  只认 `node`/`node.exe`（拒绝 `notepad.exe`、`explorer.exe`、`nodejs-helper.exe`）；
+  命令行必须指向本项目 `dist\index.js`（覆盖绝对/相对写法、`/` 与 `\`、大小写、空格与引号；
+  拒绝 `dist\index.js.bak`、别的项目的 `dist\index.js` 与无关进程）；
+  启动时间必须与 `lock.startedAt` 一致（±9 秒通过、±11 秒与明显不同则拒绝、无法解析也拒绝）
 - **`run-monitor.cmd` 守护**（`tests/run-monitor-cmd.test.ts`，10 个用例）：ASCII-only / CRLF / 无 `%DATE%`、`%TIME%` / 无绝对路径 / 无凭据
 
 ---
@@ -486,6 +515,8 @@ CI **不读取真实 `.env`，不需要 `TARGET_QQ` / `NAPCAT_TOKEN`，不调用
 | 任务 State 显示 `Running`，但日志不再更新 | 用 `status-scheduled-task.ps1` 看 `data\monitor.lock` 的 PID 是否存活。若 Monitor 已死而任务仍显示 Running，重启任务：`Stop-ScheduledTask -TaskName "Warframe Fissure Monitor"; Start-ScheduledTask -TaskName "Warframe Fissure Monitor"`。 |
 | 任务 `LastTaskResult` = `2147946720`（0x800710E0） | 正常现象：任务已在运行，多实例策略 `IgnoreNew` 拒绝了这次启动（不会产生第二个 Monitor）。 |
 | 卸载后 Monitor 仍在运行 / `npm start` 提示已有实例 | 见 5.6：`Stop-ScheduledTask` 不会结束 `node` 子进程。用 `uninstall-scheduled-task.ps1 -StopMonitorProcess`，或按 `data\monitor.lock` 里的 PID 手工 `Stop-Process -Id <PID>`。 |
+| `uninstall -StopMonitorProcess` 输出 `拒绝结束 PID ...` 并返回 1 | 这是**保护机制**：该 PID 存在但无法确认属于本项目（进程名不是 node / 命令行不指向本项目 `dist\index.js` / 启动时间与 `lock.startedAt` 差超过 10 秒），可能是 Windows 把 PID 重用了。脚本不会杀它；用任务管理器按 PID 核对命令行，确认后再自行处理。 |
+| `status` 显示 `suspicious / unverified` | 同上。若确认本项目的 Monitor 其实没在运行，可以删除 `data\monitor.lock`（仅当你确定没有 Monitor 在跑），下次启动会重新生成。 |
 | 登录后任务没有自动启动 | 确认任务 State 为 `Ready` 且触发器用户是当前用户（`status-scheduled-task.ps1`）；`StartWhenAvailable` 会在条件恢复后补启动。也可以手工 `Start-ScheduledTask` 立即验证。 |
 | 计划任务里 `node` 找不到 / 立即失败 | 计划任务使用登录用户的环境变量。`install-scheduled-task.ps1` 会打印它解析到的 `node.exe` 路径；请确认该路径来自持久化的用户/系统 PATH（脚本不会修改 PATH）。 |
 | 改了 `.env` 后想马上生效 | 重启任务：`Stop-ScheduledTask -TaskName "Warframe Fissure Monitor"; Start-ScheduledTask -TaskName "Warframe Fissure Monitor"`，然后用 `-StopMonitorProcess` 或 `Stop-Process` 结束可能残留的旧 Monitor。 |

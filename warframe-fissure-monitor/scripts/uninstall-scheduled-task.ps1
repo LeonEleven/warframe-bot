@@ -22,9 +22,14 @@
     - 因此默认行为是「只报告 + 给出命令」，需要彻底停止时请加 -StopMonitorProcess。
 
 .PARAMETER StopMonitorProcess
-    显式要求：在删除任务后，若 Monitor 进程仍然存活，则强制结束它。
-    注意这是强制停止（TerminateProcess），Node 来不及执行退出清理，data\monitor.lock 会留下 stale，
-    下次启动时由项目自身自动清理。
+    显式要求：在删除任务后，若 Monitor 进程仍然存活，则结束它。
+    **安全性**：结束之前会做身份校验（见 scheduled-task-common.ps1）：
+    进程名必须是 node，命令行必须指向本项目的 dist\index.js，
+    且进程启动时间必须与 lock.startedAt 一致（默认容忍 10 秒）。
+    只有三项全部通过（verified）才会执行 Stop-Process；
+    任何一项无法确认时都会拒绝结束进程并以退出码 1 结束，交由人工确认。
+    这样即使 Monitor 异常退出留下 stale lock、原 PID 又被其它程序占用，也不会误杀无关进程。
+    强制停止时 Node 来不及执行退出清理，data\monitor.lock 会留下 stale，下次启动时由项目自身自动清理。
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-scheduled-task.ps1
@@ -51,6 +56,14 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = (Resolve-Path (Join-Path $scriptDir '..')).Path
 $lockFile = Join-Path $projectRoot 'data\monitor.lock'
 
+# 公共 helper：Monitor 进程身份验证（见 scheduled-task-common.ps1）
+$commonScript = Join-Path $scriptDir 'scheduled-task-common.ps1'
+if (-not (Test-Path -LiteralPath $commonScript)) {
+    Write-Host "错误：缺少公共脚本 $commonScript" -ForegroundColor Red
+    exit 1
+}
+. $commonScript
+
 Write-Host '========================================================='
 Write-Host ' Warframe Fissure Monitor - 卸载计划任务'
 Write-Host '========================================================='
@@ -58,57 +71,9 @@ Write-Info "项目根目录：$projectRoot"
 Write-Info '本脚本不会删除任何项目文件（.env / state.json / logs / dist / node_modules 全部保留）。'
 
 # ---------------------------------------------------------------- 残留 Monitor 进程处理
-# 只报告 / 或按显式开关停止；无论哪条路径都不会删除任何文件
-function Stop-MonitorProcessIfRequested {
-    param([switch]$Enabled)
-
-    if (-not (Test-Path -LiteralPath $lockFile)) {
-        Write-Host 'Monitor lock    : 不存在（没有发现运行中的 Monitor）'
-        return
-    }
-
-    $lockPid = $null
-    try {
-        $lockData = Get-Content -LiteralPath $lockFile -Raw | ConvertFrom-Json
-        $lockPid = $lockData.pid
-    }
-    catch {
-        $lockPid = $null
-    }
-
-    if ($null -eq $lockPid) {
-        Write-Host 'Monitor lock    : 存在但无法解析（属项目自身处理范围，本脚本不删除）'
-        return
-    }
-
-    $process = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
-    if ($null -eq $process) {
-        Write-Host "Monitor lock    : stale（PID $lockPid 已不存在），下次启动时项目会自动清理。"
-        return
-    }
-
-    if (-not $Enabled) {
-        Write-Host ''
-        Write-Host "提示：Monitor 进程仍然存活（PID $lockPid）。"
-        Write-Host '      原因：Stop-ScheduledTask 只结束了 action 进程 cmd.exe，Windows 不会连带结束 node 子进程。'
-        Write-Host '      本脚本默认不会强杀它（它仍具备发送 QQ 通知的能力）。如需一并停止，请执行：'
-        Write-Host '        powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-scheduled-task.ps1 -StopMonitorProcess'
-        return
-    }
-
-    Write-Info "已指定 -StopMonitorProcess：正在结束残留的 Monitor 进程（PID $lockPid）..."
-    Stop-Process -Id $lockPid -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 1000
-
-    $stillRunning = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
-    if ($null -ne $stillRunning) {
-        Write-Host "警告：PID $lockPid 仍然存活，请手工检查。" -ForegroundColor Yellow
-    }
-    else {
-        Write-Host "已结束 Monitor 进程（PID $lockPid）。"
-        Write-Host 'data\monitor.lock 现在是 stale，下次启动时项目自身会自动清理。'
-    }
-}
+# 默认只报告；只有 -StopMonitorProcess 且身份校验 verified 时才会强停。
+# 身份校验（进程名 + 命令行 + 启动时间）见 scheduled-task-common.ps1。
+$script:MonitorCleanupResult = ''
 
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -eq $task) {
@@ -116,8 +81,9 @@ if ($null -eq $task) {
     Write-Host '任务不存在，无需删除。'
     # 任务已删除时仍然允许用它单独停止残留 Monitor
     if ($StopMonitorProcess) {
-        Stop-MonitorProcessIfRequested -Enabled
+        $script:MonitorCleanupResult = Invoke-MonitorProcessCleanup -ProjectRoot $projectRoot -LockFile $lockFile -Enabled
     }
+    if ($script:MonitorCleanupResult -eq 'refused') { exit 1 }
     exit 0
 }
 
@@ -172,12 +138,20 @@ else {
     exit 1
 }
 
-# ---------------------------------------------------------------- 残留进程处理（默认只报告，-StopMonitorProcess 才强停）
-Stop-MonitorProcessIfRequested -Enabled:$StopMonitorProcess
+# ---------------------------------------------------------------- 残留进程处理
+# 默认只报告；-StopMonitorProcess 时也只有身份校验 verified 才会真正结束进程
+$script:MonitorCleanupResult = Invoke-MonitorProcessCleanup -ProjectRoot $projectRoot -LockFile $lockFile -Enabled:$StopMonitorProcess
 
 Write-Host ''
 Write-Host '后续操作：'
 Write-Host '  重新安装：powershell -ExecutionPolicy Bypass -File .\scripts\install-scheduled-task.ps1'
 Write-Host '  查看状态：powershell -ExecutionPolicy Bypass -File .\scripts\status-scheduled-task.ps1'
 Write-Host '  彻底停止：powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-scheduled-task.ps1 -StopMonitorProcess'
+
+if ($script:MonitorCleanupResult -eq 'refused') {
+    Write-Host ''
+    Write-Host '注意：由于无法确认该 PID 属于本项目 Monitor，本次没有结束任何进程（退出码 1）。' -ForegroundColor Yellow
+    exit 1
+}
+
 exit 0

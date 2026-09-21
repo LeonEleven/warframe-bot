@@ -3,16 +3,19 @@
  *
  * 为什么用静态检查而不是真的注册任务：
  * - CI 运行在 Linux/临时环境，不能（也不应该）往 Runner 的 Task Scheduler 注册长期任务
- * - 计划任务的真实注册 / 启动 / 停止行为已在本机 Windows 上人工验证（见 README 与提交说明）
+ * - 计划任务的真实注册 / 启动 / 停止 / 身份校验行为已在本机 Windows 上人工验证（见 README 与提交说明）
  *
  * 这里锁定的关键契约：
- * - 只有一个逻辑任务名，且三个脚本一致
+ * - 只有一个逻辑任务名，且三个主脚本一致
  * - 延迟是 Task Scheduler 原生 Trigger Delay（PT60S），不是 action 里的 sleep/timeout
  * - MultipleInstances=IgnoreNew、ExecutionTimeLimit=PT0S（无限）、RestartInterval=PT1M
  * - 使用当前登录用户（Interactive + Limited），不使用 SYSTEM、不保存密码
  * - action 指向 scripts\run-monitor.cmd，工作目录为项目根
  * - 不含硬编码用户路径与任何凭据
+ * - 进程身份校验（PID + 进程名 + 命令行 + 启动时间）存在，且 Stop-Process 只在 verified 之后
  * - 脚本保存为 UTF-8 with BOM（Windows PowerShell 5.1 才能正确解析中文）+ CRLF
+ *
+ * 纯逻辑（进程名 / 命令行 / 启动时间判断）的行为测试见 tests/monitor-identity-logic.test.ts。
  */
 
 import assert from 'node:assert/strict';
@@ -21,6 +24,9 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 const TASK_NAME = 'Warframe Fissure Monitor';
+
+const MAIN_SCRIPTS = ['install-scheduled-task.ps1', 'status-scheduled-task.ps1', 'uninstall-scheduled-task.ps1'];
+const ALL_SCRIPTS = ['scheduled-task-common.ps1', ...MAIN_SCRIPTS];
 
 interface ScriptFile {
   name: string;
@@ -37,17 +43,9 @@ async function readScript(name: string): Promise<ScriptFile> {
   return { name, path: fileURLToPath(url), text, bytes };
 }
 
-async function readAll(): Promise<{
-  install: ScriptFile;
-  status: ScriptFile;
-  uninstall: ScriptFile;
-}> {
-  const [install, status, uninstall] = await Promise.all([
-    readScript('install-scheduled-task.ps1'),
-    readScript('status-scheduled-task.ps1'),
-    readScript('uninstall-scheduled-task.ps1'),
-  ]);
-  return { install, status, uninstall };
+async function readAll(): Promise<Record<string, ScriptFile>> {
+  const entries = await Promise.all(ALL_SCRIPTS.map(async (name) => [name, await readScript(name)] as const));
+  return Object.fromEntries(entries);
 }
 
 function extractTaskName(text: string): string | null {
@@ -55,7 +53,7 @@ function extractTaskName(text: string): string | null {
   return match?.[1] ?? null;
 }
 
-test('三个计划任务脚本都存在且非空', async () => {
+test('四个部署脚本都存在、非空，并声明最低 PowerShell 5.1', async () => {
   const scripts = await readAll();
 
   for (const script of Object.values(scripts)) {
@@ -64,11 +62,11 @@ test('三个计划任务脚本都存在且非空', async () => {
   }
 });
 
-test('三个脚本使用同一个任务名', async () => {
+test('三个主脚本使用同一个任务名', async () => {
   const scripts = await readAll();
 
-  for (const script of Object.values(scripts)) {
-    assert.equal(extractTaskName(script.text), TASK_NAME, `${script.name} 的任务名必须一致`);
+  for (const name of MAIN_SCRIPTS) {
+    assert.equal(extractTaskName(scripts[name]?.text ?? ''), TASK_NAME, `${name} 的任务名必须一致`);
   }
 });
 
@@ -90,7 +88,8 @@ test('脚本保存为 UTF-8 with BOM（Windows PowerShell 5.1 才能正确读中
 });
 
 test('install：使用 Task Scheduler 原生 Trigger Delay = 60 秒（不是 sleep/timeout 模拟）', async () => {
-  const { install } = await readAll();
+  const { 'install-scheduled-task.ps1': install } = await readAll();
+  assert.ok(install !== undefined);
 
   assert.ok(install.text.includes('-AtLogOn'), '必须使用 AtLogOn 触发器');
   assert.ok(install.text.includes("$LogonDelay = 'PT60S'"), '延迟常量必须为 PT60S（60 秒）');
@@ -102,28 +101,24 @@ test('install：使用 Task Scheduler 原生 Trigger Delay = 60 秒（不是 sle
 });
 
 test('install：多实例 / 执行时限 / 重启 / 电池 / 空闲等设置符合长期常驻要求', async () => {
-  const { install } = await readAll();
+  const { 'install-scheduled-task.ps1': install } = await readAll();
+  assert.ok(install !== undefined);
 
-  // 多实例：IgnoreNew（第一层保护；项目内 PID lock 为第二层）
-  assert.ok(install.text.includes('IgnoreNew'), 'Must use MultipleInstances IgnoreNew');
-  // 执行时限：PT0S = 无限制
+  assert.ok(install.text.includes('IgnoreNew'), '必须使用 MultipleInstances IgnoreNew');
   assert.ok(install.text.includes('-ExecutionTimeLimit ([TimeSpan]::Zero)'), '执行时限必须为无限制（PT0S）');
-  // 失败重启：1 分钟 / 3 次
   assert.ok(install.text.includes('$RestartIntervalMinutes = 1'), '重启间隔应为 1 分钟');
   assert.ok(install.text.includes('$RestartCount = 3'), '重启次数应为 3');
   assert.ok(install.text.includes('-RestartInterval (New-TimeSpan -Minutes $RestartIntervalMinutes)'));
-  // 电池
   assert.ok(install.text.includes('-AllowStartIfOnBatteries'), '应允许电池供电时启动');
   assert.ok(install.text.includes('-DontStopIfGoingOnBatteries'), '切换到电池不应停止');
-  // 错过启动机会时补启
   assert.ok(install.text.includes('-StartWhenAvailable'), '错过计划时间后应可补启动');
-  // 空闲与网络：都不做要求
   assert.ok(!install.text.includes('-RunOnlyIfIdle'), '不得要求计算机空闲');
   assert.doesNotMatch(install.text, /NetworkProfile|NetworkSettings|-NetworkName/i, '不得绑定网络配置');
 });
 
 test('install：使用当前登录用户、Interactive + Limited，不使用 SYSTEM、不需要密码', async () => {
-  const { install } = await readAll();
+  const { 'install-scheduled-task.ps1': install } = await readAll();
+  assert.ok(install !== undefined);
 
   assert.ok(
     install.text.includes('[System.Security.Principal.WindowsIdentity]::GetCurrent().Name'),
@@ -140,7 +135,8 @@ test('install：使用当前登录用户、Interactive + Limited，不使用 SYS
 });
 
 test('install：action 指向 run-monitor.cmd，工作目录为项目根，路径含空格时安全', async () => {
-  const { install } = await readAll();
+  const { 'install-scheduled-task.ps1': install } = await readAll();
+  assert.ok(install !== undefined);
 
   assert.ok(install.text.includes('run-monitor.cmd'), 'action 必须指向 run-monitor.cmd');
   assert.ok(install.text.includes('cmd.exe'), '应通过 cmd.exe /d /c 调用批处理');
@@ -153,7 +149,8 @@ test('install：action 指向 run-monitor.cmd，工作目录为项目根，路�
 });
 
 test('install：安装前检查 run-monitor.cmd / dist\\index.js / .env / node', async () => {
-  const { install } = await readAll();
+  const { 'install-scheduled-task.ps1': install } = await readAll();
+  assert.ok(install !== undefined);
 
   assert.ok(install.text.includes("Join-Path $projectRoot 'scripts\\run-monitor.cmd'"), '应检查启动脚本');
   assert.ok(install.text.includes("Join-Path $projectRoot 'dist\\index.js'"), '应检查编译产物');
@@ -164,7 +161,8 @@ test('install：安装前检查 run-monitor.cmd / dist\\index.js / .env / node',
 });
 
 test('status：报告任务与项目侧状态，且完全只读', async () => {
-  const { status } = await readAll();
+  const { 'status-scheduled-task.ps1': status } = await readAll();
+  assert.ok(status !== undefined);
 
   for (const expected of [
     'Get-ScheduledTask',
@@ -175,8 +173,6 @@ test('status：报告任务与项目侧状态，且完全只读', async () => {
     'Triggers',
     'Principal',
     "data\\monitor.lock",
-    'Get-Process -Id',
-    'stale',
     'logs\\monitor.log',
     'Length',
     'LastWriteTime',
@@ -199,68 +195,133 @@ test('status：报告任务与项目侧状态，且完全只读', async () => {
   }
 });
 
-test('uninstall：幂等删除任务，不删除项目文件，也不强杀进程', async () => {
-  const { uninstall } = await readAll();
+test('status：不再把「PID 存在」直接当成 running（必须走身份校验）', async () => {
+  const { 'status-scheduled-task.ps1': status } = await readAll();
+  assert.ok(status !== undefined);
+
+  assert.ok(status.text.includes('. $commonScript'), 'status 必须 dot-source 公共 helper');
+  assert.ok(
+    status.text.includes('Get-MonitorProcessIdentity'),
+    'status 必须调用 Get-MonitorProcessIdentity 做身份校验，而不是只看 Get-Process 是否成功',
+  );
+  assert.ok(status.text.includes('running (verified)'), 'status 应输出 running (verified)');
+  assert.ok(status.text.includes('suspicious / unverified'), 'status 应输出 suspicious / unverified');
+  assert.ok(status.text.includes("switch ($identity.State)"), 'status 应按身份校验结果分支输出');
+  assert.ok(
+    !/Monitor process : running\s*'/i.test(status.text) || !status.text.includes("Monitor process : running'"),
+    '不得再输出无条件判定为 running 的行',
+  );
+});
+
+test('uninstall：幂等删除任务，不删除项目文件，强杀委托给经过身份校验的公共逻辑', async () => {
+  const { 'uninstall-scheduled-task.ps1': uninstall } = await readAll();
+  assert.ok(uninstall !== undefined);
 
   assert.ok(uninstall.text.includes('Unregister-ScheduledTask'), '必须删除任务');
   assert.ok(uninstall.text.includes('Stop-ScheduledTask'), '任务在运行时应先停止');
   assert.ok(uninstall.text.includes('任务不存在，无需删除。'), '任务不存在时应给出幂等提示而非异常');
   assert.ok(uninstall.text.includes('-Confirm:$false'), '应非交互式执行');
 
-  // 不删除项目文件：检查的是实际行为（不存在任何破坏性命令），而不是注释措辞
-  for (const destructive of [
-    'Remove-Item',
-    'Remove-ItemProperty',
-    'Clear-Content',
-    'Set-Content',
-    'Out-File',
-    'Move-Item',
-    'Rename-Item',
-    'New-Item',
-    'del ',
-    'rmdir',
-    'erase ',
-  ]) {
+  // 不删除项目文件：检查实际行为（不存在任何破坏性命令）
+  for (const destructive of ['Remove-Item', 'Remove-ItemProperty', 'Clear-Content', 'Set-Content', 'Out-File', 'Move-Item', 'Rename-Item', 'New-Item', 'del ', 'rmdir', 'erase ']) {
     assert.ok(!uninstall.text.includes(destructive), `uninstall 不得包含破坏性命令：${destructive}`);
   }
+  assert.ok(uninstall.text.includes('不会删除任何项目文件'), 'uninstall 应明确说明不会删除任何项目文件');
+
+  // 强杀逻辑已抽到公共 helper，且必须经过身份校验
+  assert.ok(uninstall.text.includes('. $commonScript'), 'uninstall 必须 dot-source 公共 helper');
+  assert.ok(uninstall.text.includes('Invoke-MonitorProcessCleanup'), 'uninstall 必须调用公共清理函数');
+  assert.ok(uninstall.text.includes('-Enabled:$StopMonitorProcess'), '必须把显式开关传给清理函数');
+  // 只看「实际调用」，注释/提示里出现关键字是允许的
   assert.ok(
-    uninstall.text.includes('不会删除任何项目文件'),
-    'uninstall 应明确说明不会删除任何项目文件',
+    !/Stop-Process\s+-Id/i.test(uninstall.text),
+    'uninstall 自己不应调用 Stop-Process（交由公共 identity guard 处理）',
   );
-  // 默认不 kill monitor：强制结束只允许出现在受开关保护的函数内，且所有调用点都必须显式传开关
-  assert.ok(uninstall.text.includes('[switch]$StopMonitorProcess'), '应提供显式的 -StopMonitorProcess 开关');
-  const killCalls = uninstall.text.match(/Stop-Process/g) ?? [];
-  assert.equal(killCalls.length, 1, '强制结束进程的调用应当只有一处');
-  const killIndex = uninstall.text.indexOf('Stop-Process');
-  const guardIndex = uninstall.text.indexOf('if (-not $Enabled)');
-  assert.ok(guardIndex > 0 && guardIndex < killIndex, '强制结束必须位于 `if (-not $Enabled) { ... return }` 之后');
-  assert.ok(
-    uninstall.text.includes('param([switch]$Enabled)'),
-    '清理函数应通过 [switch]$Enabled 才能强停',
-  );
-  const enabledCallSites = [...uninstall.text.matchAll(/-Enabled(?::\$StopMonitorProcess)?/g)];
-  assert.ok(enabledCallSites.length >= 2, '所有清理调用点都应显式传入开关（其中至少一处为 -Enabled:$StopMonitorProcess）');
-  assert.ok(
-    uninstall.text.includes('-Enabled:$StopMonitorProcess'),
-    '调用点必须使用 -Enabled:$StopMonitorProcess，保证默认路径不强停',
-  );
-  assert.ok(
-    uninstall.text.includes('本脚本默认不会强杀它'),
-    '默认路径必须明确说明不会强杀 monitor 进程',
-  );
+  assert.ok(uninstall.text.includes("$script:MonitorCleanupResult -eq 'refused'"), 'refused 时应以非 0 退出');
+  assert.ok(uninstall.text.includes('exit 1'), 'refused 时应以非 0 退出');
   // 实测结论要写清楚：Stop-ScheduledTask 不会连带结束 node 子进程
-  assert.ok(
-    uninstall.text.includes('不会连带结束 node 子进程'),
-    'uninstall 文档应说明 Stop-ScheduledTask 的孤立子进程行为',
-  );
-  // 实测结论要写清楚：Stop-ScheduledTask 不会连带结束 node 子进程
-  assert.ok(
-    uninstall.text.includes('不会连带结束 node 子进程'),
-    'uninstall 文档应说明 Stop-ScheduledTask 的孤立子进程行为',
-  );
+  assert.ok(uninstall.text.includes('不会连带结束 node 子进程'), 'uninstall 文档应说明 Stop-ScheduledTask 的孤立子进程行为');
+  // 拒绝强杀的说明与判定文案在公共 helper 里（见下一个测试）
 });
 
-test('三个脚本都不含硬编码用户路径与任何凭据', async () => {
+test('公共 helper：进程身份校验要素齐全（CIM / 进程名 / 命令行 / 启动时间）', async () => {
+  const { 'scheduled-task-common.ps1': common } = await readAll();
+  assert.ok(common !== undefined);
+
+  for (const fn of [
+    'Get-MonitorExpectedScriptPath',
+    'Test-MonitorProcessName',
+    'Test-MonitorCommandLine',
+    'Test-MonitorStartTime',
+    'Read-MonitorLockFile',
+    'Get-MonitorProcessIdentity',
+    'Invoke-MonitorProcessCleanup',
+  ]) {
+    assert.ok(common.text.includes(`function ${fn}`), `公共 helper 应定义 ${fn}`);
+  }
+
+  assert.ok(common.text.includes('Get-CimInstance'), '应使用 Get-CimInstance 读取进程信息');
+  assert.ok(common.text.includes('Win32_Process'), '应查询 Win32_Process');
+  // 只看是否真的调用了 wmic（注释里提到这个词是允许的）
+  assert.ok(!/^\s*wmic(\.exe)?\b/im.test(common.text), '不得调用已弃用的 wmic.exe');
+  assert.ok(common.text.includes('ExecutablePath'), '应读取 ExecutablePath');
+  assert.ok(common.text.includes('CommandLine'), '应读取 CommandLine');
+  assert.ok(common.text.includes('StartTimeToleranceSeconds'), '启动时间比较必须有容忍参数');
+  assert.ok(common.text.includes("State          = 'unverified'"), '默认状态必须是 unverified（不猜测）');
+});
+
+test('PID 重用防护：Stop-Process 只出现在 verified 分支之后，且只有一处', async () => {
+  const scripts = await readAll();
+  const common = scripts['scheduled-task-common.ps1'];
+  assert.ok(common !== undefined);
+
+  // 只统计「实际调用」，注释里提到 Stop-Process 不算
+  const killCalls = common.text.match(/Stop-Process\s+-Id/g) ?? [];
+  assert.equal(killCalls.length, 1, '强杀调用应当只有一处（且必须带 -Id）');
+
+  const stopIndex = common.text.search(/Stop-Process\s+-Id/);
+
+  // 未通过身份校验的分支必须直接 return，绝不能继续走到 Stop-Process
+  const unverifiedGuard = /if \(\$identity\.State -ne 'verified'\) \{[\s\S]*?return 'refused'\s*\}/.exec(common.text);
+  assert.ok(unverifiedGuard, '身份未通过时必须 return refused（不能继续往下执行）');
+  const unverifiedGuardEnd = (unverifiedGuard.index ?? 0) + unverifiedGuard[0].length;
+
+  // 默认（未指定 -StopMonitorProcess）路径同样必须直接 return
+  const defaultGuards = [...common.text.matchAll(/if \(-not \$Enabled\) \{[\s\S]*?return 'reported'\s*\}/g)];
+  assert.ok(defaultGuards.length >= 1, '默认路径必须 return reported（不强杀）');
+  const defaultGuardEnds = defaultGuards.map((match) => (match.index ?? 0) + match[0].length);
+
+  assert.ok(stopIndex > unverifiedGuardEnd, 'Stop-Process 必须在「未通过则 return」分支之后');
+  assert.ok(
+    stopIndex > Math.max(...defaultGuardEnds),
+    'Stop-Process 必须在「默认不 kill 则 return」分支之后',
+  );
+
+  // 三个主脚本都不得自己调用 Stop-Process
+  for (const name of MAIN_SCRIPTS) {
+    assert.ok(
+      !/Stop-Process\s+-Id/i.test(scripts[name]?.text ?? ''),
+      `${name} 不得直接调用 Stop-Process`,
+    );
+  }
+
+  // 拒绝强杀的关键措辞
+  assert.ok(common.text.includes('拒绝结束 PID'), '拒绝强杀时应给出明确提示');
+  assert.ok(common.text.includes('本脚本没有执行 Stop-Process'), '应说明未执行 Stop-Process');
+  assert.ok(
+    common.text.includes('无法确认它属于 warframe-fissure-monitor'),
+    '拒绝强杀时应说明「无法确认该 PID 属于本项目」',
+  );
+  assert.ok(
+    common.text.includes('为避免 PID 重用导致误杀其它程序'),
+    '拒绝强杀时应说明是为了避免 PID 重用误杀',
+  );
+  assert.ok(common.text.includes('无法读取命令行'), '读不到命令行时必须判为 unverified');
+  assert.ok(common.text.includes('进程名不是 node'), '进程名不符时必须拒绝');
+  assert.ok(common.text.includes('PID 可能已被系统重用'), '启动时间不一致时应提示 PID 重用');
+});
+
+test('三个主脚本都不含硬编码用户路径与任何凭据', async () => {
   const scripts = await readAll();
 
   for (const script of Object.values(scripts)) {
@@ -273,7 +334,8 @@ test('三个脚本都不含硬编码用户路径与任何凭据', async () => {
 });
 
 test('install 干跑模式可预览且不注册任务', async () => {
-  const { install } = await readAll();
+  const { 'install-scheduled-task.ps1': install } = await readAll();
+  assert.ok(install !== undefined);
 
   assert.ok(install.text.includes('[switch]$DryRun'), 'install 应支持 -DryRun 预览');
   assert.match(

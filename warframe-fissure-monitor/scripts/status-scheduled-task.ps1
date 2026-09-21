@@ -7,10 +7,15 @@
     输出内容：
     - 任务是否存在、State、LastRunTime、LastTaskResult、NextRunTime
     - Trigger（登录触发 + 延迟）、运行用户、Action（cmd -> run-monitor.cmd）、工作目录
-    - 项目侧状态：data\monitor.lock 中的 PID 对应进程是否存活（stale 只报告，不删除）
+    - 项目侧状态：data\monitor.lock 中的 PID 是否确实属于本项目 Monitor
+      （进程名 + 命令行指向本项目 dist\index.js + 启动时间与 lock.startedAt 一致）
+      * PID 不存在            -> stale
+      * 校验通过              -> running (verified)
+      * PID 存在但校验不通过  -> suspicious / unverified（可能是 Windows PID 被重用）
     - logs\monitor.log 是否存在、大小、最后写入时间（不打印日志内容）
 
-    本脚本不会注册 / 停止 / 删除任何任务，也不会删除任何文件。
+    本脚本不会注册 / 停止 / 删除任何任务，不会删除任何文件，
+    也不会结束任何进程（包括 unverified 的 PID，只报告）。
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\scripts\status-scheduled-task.ps1
@@ -47,6 +52,14 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = (Resolve-Path (Join-Path $scriptDir '..')).Path
 $lockFile = Join-Path $projectRoot 'data\monitor.lock'
 $logFile = Join-Path $projectRoot 'logs\monitor.log'
+
+# 公共 helper：Monitor 进程身份验证（见 scheduled-task-common.ps1）
+$commonScript = Join-Path $scriptDir 'scheduled-task-common.ps1'
+if (-not (Test-Path -LiteralPath $commonScript)) {
+    Write-Host "错误：缺少公共脚本 $commonScript" -ForegroundColor Red
+    exit 1
+}
+. $commonScript
 
 Write-Host '========================================================='
 Write-Host ' Warframe Fissure Monitor - 计划任务状态（只读）'
@@ -112,37 +125,49 @@ else {
 # ---------------------------------------------------------------- 项目侧
 Write-Section 'Monitor 进程（依据 data\monitor.lock）'
 
-if (-not (Test-Path -LiteralPath $lockFile)) {
+$lock = Read-MonitorLockFile -LockFile $lockFile
+
+if (-not $lock.Exists) {
     Write-Host 'Monitor lock    : 不存在（Monitor 未在运行）'
     Write-Host "Lock 文件路径   : $lockFile"
 }
+elseif ($lock.Pid -le 0) {
+    Write-Host 'Monitor lock    : 存在但无法解析出有效 PID（属于项目自身处理范围，本脚本不删除）'
+    Write-Host "Lock 文件路径   : $lockFile"
+}
 else {
-    $lockReadOk = $true
-    $lockPid = $null
-    try {
-        $lockData = Get-Content -LiteralPath $lockFile -Raw | ConvertFrom-Json
-        $lockPid = $lockData.pid
-    }
-    catch {
-        $lockReadOk = $false
-    }
+    # 注意：这里不只判断 PID 是否存在 —— Windows 的 PID 会被重用，
+    #       必须同时校验进程名、命令行与启动时间，避免把「别的进程」当成 Monitor。
+    $identity = Get-MonitorProcessIdentity -LockPid $lock.Pid -LockStartedAt $lock.StartedAt -ProjectRoot $projectRoot
 
-    if (-not $lockReadOk -or $null -eq $lockPid) {
-        Write-Host 'Monitor lock    : 存在但无法解析（属于项目自身处理范围，本脚本不删除）'
-    }
-    else {
-        $process = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
-        if ($null -ne $process) {
-            Write-Host 'Monitor process : running'
-            Write-Host "PID             : $lockPid"
-            Write-Host "进程名          : $($process.ProcessName)"
-            Write-Host "启动时间        : $($process.StartTime)"
-            Write-Host "Lock startedAt  : $($lockData.startedAt)"
-        }
-        else {
+    switch ($identity.State) {
+        'stale' {
             Write-Host 'Monitor lock    : stale'
-            Write-Host "PID             : $lockPid（该进程已不存在）"
+            Write-Host "PID             : $($identity.Pid)（该进程已不存在）"
             Write-Host '说明            : 属正常现象（异常退出 / 任务被停止后留下），下次启动时由项目自身自动清理，无需手工删除。'
+        }
+        'verified' {
+            Write-Host 'Monitor process : running (verified)'
+            Write-Host "PID             : $($identity.Pid)"
+            Write-Host 'Process         : node'
+            Write-Host 'Identity        : verified'
+            Write-Host "进程启动时间    : $($identity.StartTime)"
+            Write-Host "Lock startedAt  : $($lock.StartedAt)"
+            Write-Host "命令行          : $($identity.CommandLine.Trim())"
+            Write-Host "校验依据        : $($identity.Reason)"
+        }
+        default {
+            Write-Host 'Monitor lock    : suspicious / unverified'
+            Write-Host "PID             : $($identity.Pid)"
+            Write-Host "Process         : $($identity.ProcessName)"
+            Write-Host 'Identity        : unverified'
+            Write-Host "原因            : $($identity.Reason)"
+            Write-Host '说明            : PID 当前存在，但无法确认它属于本项目 Monitor（可能是 PID 被系统重用）。'
+            Write-Host '                  本脚本只报告，不会结束该进程，也不会删除 lock。'
+            Write-Host "  命令行        : $($identity.CommandLine)"
+            Write-Host "  进程启动时间  : $($identity.StartTime)"
+            Write-Host "  lock.startedAt: $($lock.StartedAt)"
+            Write-Host "  期望脚本路径  : $($identity.ExpectedPath)"
         }
     }
 }
