@@ -1,0 +1,28 @@
+{
+  "name": "warframe-fissure-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "监控 Warframe 国际服 PC 虚空裂缝（Steel Path + Survival + Void），命中时通过 NapCatQQ (OneBot 11) 私聊通知，带持久化去重。",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "tsx --test \"tests/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "check": "tsx src/scripts/check.ts",
+    "test:notification": "tsx src/scripts/test-notification.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

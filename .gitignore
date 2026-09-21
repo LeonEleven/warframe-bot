@@ -1,0 +1,20 @@
+# 依赖与构建产物
+node_modules/
+dist/
+.npm-cache/
+
+# 本地环境变量（含 token / QQ 号，绝不提交）
+.env
+.env.local
+.env.*.local
+
+# 运行时状态（已通知的裂缝 ID）
+data/
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
