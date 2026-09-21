@@ -40,7 +40,18 @@ export interface PollOutcome {
   message: string | null;
   /** 被清理的历史 ID */
   prunedIds: string[];
-  /** 本轮错误信息（Warframe 请求失败 / NapCat 发送失败） */
+  /** provider 是否成功返回了裂缝数据（与 QQ 通知是否成功无关） */
+  fetchSucceeded: boolean;
+  /** Warframe / provider 请求或解析失败的原因；成功时为 null */
+  fetchError: string | null;
+  /** NapCat 通知发送失败的原因；未发送或发送成功时为 null */
+  notificationError: string | null;
+  /**
+   * 兼容字段：本轮出现过的任一错误（fetchError ?? notificationError）。
+   *
+   * 注意：心跳判断「Warframe 最近一次成功获取」必须使用 fetchSucceeded / fetchError，
+   * 不能用这个字段 —— 否则 NapCat 发送失败会被误当成「本轮没取到数据」。
+   */
   error: string | null;
 }
 
@@ -57,6 +68,9 @@ export async function runPollCycle(dependencies: PollDependencies): Promise<Poll
     notified: false,
     message: null,
     prunedIds: [],
+    fetchSucceeded: false,
+    fetchError: null,
+    notificationError: null,
     error: null,
   };
 
@@ -77,10 +91,14 @@ export async function runPollCycle(dependencies: PollDependencies): Promise<Poll
   try {
     fissures = await fetchFissures();
   } catch (error) {
-    outcome.error = describeError(error);
-    logger.error(`拉取 Warframe 裂缝数据失败，本轮跳过（不会给 QQ 发送任何错误消息）: ${outcome.error}`);
+    outcome.fetchError = describeError(error);
+    outcome.error = outcome.fetchError;
+    logger.error(`拉取 Warframe 裂缝数据失败，本轮跳过（不会给 QQ 发送任何错误消息）: ${outcome.fetchError}`);
     return outcome;
   }
+
+  // provider 成功返回：与后续 QQ 是否发送成功无关，这里立刻标记成功
+  outcome.fetchSucceeded = true;
   outcome.fetchedCount = fissures.length;
 
   // 3) 匹配条件（无匹配属于常态，用 debug 避免 60 秒一条的噪音日志）
@@ -113,14 +131,16 @@ export async function runPollCycle(dependencies: PollDependencies): Promise<Poll
   try {
     result = await sendMessage(message);
   } catch (error) {
-    outcome.error = describeError(error);
-    logger.error(`发送 QQ 通知时发生异常，本轮不记录为已通知，下一轮将重试: ${outcome.error}`);
+    outcome.notificationError = describeError(error);
+    outcome.error = outcome.notificationError;
+    logger.error(`发送 QQ 通知时发生异常，本轮不记录为已通知，下一轮将重试: ${outcome.notificationError}`);
     return outcome;
   }
 
   if (!result.ok) {
-    outcome.error = result.error ?? 'NapCat 发送失败';
-    logger.error(`NapCat 发送失败，本轮不记录为已通知，下一轮将重试: ${outcome.error}`, {
+    outcome.notificationError = result.error ?? 'NapCat 发送失败';
+    outcome.error = outcome.notificationError;
+    logger.error(`NapCat 发送失败，本轮不记录为已通知，下一轮将重试: ${outcome.notificationError}`, {
       status: result.status,
       retcode: result.retcode,
       detail: result.detail,

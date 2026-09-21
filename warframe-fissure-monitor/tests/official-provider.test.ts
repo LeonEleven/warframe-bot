@@ -8,7 +8,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { selectMatchingFissures } from '../src/filter.js';
-import { OfficialWorldStateProvider, parseOfficialWorldState } from '../src/warframe/official-provider.js';
+import {
+  createParserLogger,
+  OfficialWorldStateProvider,
+  parseOfficialWorldState,
+} from '../src/warframe/official-provider.js';
 import { ProviderError } from '../src/warframe/provider.js';
 import { createFetchStub, createMemoryLogger, failingFetch, loadWorldStateFixture, WORLDSTATE_FIXTURE_FETCHED_AT } from './helpers.js';
 
@@ -167,6 +171,127 @@ test('单条脏记录只跳过该条（不会静默制造错误匹配，也不�
     '被跳过的脏记录不会进入结果',
   );
   assert.match(logger.text(), /无法解析，已跳过/);
+});
+
+/**
+ * 控制台噪音测试。
+ *
+ * 背景（已核对 parser 源码）：
+ * warframe-worldstate-parser 的 defaultDeps 里 `logger: console`，且构造函数做
+ * `{ ...defaultDeps, ...deps }`；因此不注入 logger 时，每次 new WorldState() 都会
+ * 往 console.debug 打印 "No defined kuva data, skipping data" / "No outpost data, skipping"。
+ * 本项目改为注入自己的 logger（见 createParserLogger），因此解析期间不应有任何 console 输出。
+ */
+
+type ConsoleMethodName = 'debug' | 'log' | 'warn' | 'error';
+
+interface ConsoleCapture {
+  calls: Array<{ method: ConsoleMethodName; args: unknown[] }>;
+  /** 恢复原始 console 方法 */
+  restore(): void;
+  /** 断言 console 方法已与原始引用完全一致 */
+  assertRestored(): void;
+}
+
+const CONSOLE_METHODS: ConsoleMethodName[] = ['debug', 'log', 'warn', 'error'];
+
+function captureConsole(): ConsoleCapture {
+  const target = console as unknown as Record<ConsoleMethodName, (...args: unknown[]) => void>;
+  const originals = new Map<ConsoleMethodName, (...args: unknown[]) => void>();
+  const calls: Array<{ method: ConsoleMethodName; args: unknown[] }> = [];
+
+  for (const method of CONSOLE_METHODS) {
+    originals.set(method, target[method]);
+    target[method] = (...args: unknown[]): void => {
+      calls.push({ method, args });
+    };
+  }
+
+  return {
+    calls,
+    restore: (): void => {
+      for (const method of CONSOLE_METHODS) {
+        const original = originals.get(method);
+        if (original !== undefined) target[method] = original;
+      }
+    },
+    assertRestored: (): void => {
+      for (const method of CONSOLE_METHODS) {
+        assert.equal(target[method], originals.get(method), `console.${method} 必须被恢复为原始引用`);
+      }
+    },
+  };
+}
+
+test('解析 WorldState 时不会向 console 写入任何内容（含 console.debug）', async () => {
+  const fixture = await loadWorldStateFixture();
+  const capture = captureConsole();
+  let fissureCount = 0;
+
+  try {
+    fissureCount = parseOfficialWorldState(fixture).fissures.length;
+  } finally {
+    capture.restore();
+  }
+
+  assert.equal(fissureCount, 5);
+  assert.deepEqual(capture.calls, [], '解析期间不应有任何 console 输出（之前是 console.debug 噪音）');
+  capture.assertRestored();
+});
+
+test('即使提供了 logger，解析期间 console 仍然保持干净，且 console 方法在结束后完全恢复', async () => {
+  const fixture = await loadWorldStateFixture();
+  const logger = createMemoryLogger();
+  const capture = captureConsole();
+
+  try {
+    parseOfficialWorldState(fixture, { logger });
+    assert.deepEqual(capture.calls, []);
+  } finally {
+    capture.restore();
+  }
+
+  capture.assertRestored();
+});
+
+test('parser 的 debug 信息被转发到 logger.debug（不丢信息、不吞未知警告）', async () => {
+  const fixture = await loadWorldStateFixture();
+  const logger = createMemoryLogger();
+  const capture = captureConsole();
+
+  try {
+    parseOfficialWorldState(fixture, { logger });
+  } finally {
+    capture.restore();
+  }
+  capture.assertRestored();
+
+  const debugMessages = logger.records.filter((record) => record.level === 'debug').map((record) => record.message);
+  assert.ok(
+    debugMessages.some((message) => message.includes('[worldstate-parser] No defined kuva data, skipping data')),
+    'kuva 提示应转发到 logger.debug',
+  );
+  assert.ok(
+    debugMessages.some((message) => message.includes('[worldstate-parser] No outpost data, skipping')),
+    'outpost 提示应转发到 logger.debug',
+  );
+});
+
+test('createParserLogger 原样转发任意 parser 信息（不吞掉真正的诊断警告）', () => {
+  const logger = createMemoryLogger();
+  const parserLogger = createParserLogger(logger);
+
+  parserLogger.debug('Failed to fetch bounty rewards for Cetus: request failed');
+
+  assert.ok(
+    logger.text().includes('[worldstate-parser] Failed to fetch bounty rewards for Cetus: request failed'),
+    '未知/重要信息必须被转发，而不是被丢弃',
+  );
+});
+
+test('createParserLogger 在未提供 logger 时安全地什么都不做', () => {
+  const parserLogger = createParserLogger(undefined);
+  assert.doesNotThrow(() => parserLogger.debug('anything'));
 });
 
 test('fixture 中的裂缝不会因为解析而变成 unknown 标志', async () => {

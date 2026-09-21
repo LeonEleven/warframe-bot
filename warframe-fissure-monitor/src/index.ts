@@ -4,7 +4,7 @@
 
 import { buildRuntime } from './app.js';
 import { describeConfig, loadConfig } from './config.js';
-import { createMonitorStats, Heartbeat } from './heartbeat.js';
+import { applyPollOutcome, createMonitorStats, Heartbeat } from './heartbeat.js';
 import { InstanceAlreadyRunningError, SingleInstanceLock } from './lock.js';
 import { createLogger, describeError } from './logger.js';
 import { runPollCycle } from './poller.js';
@@ -68,8 +68,6 @@ async function main(): Promise<void> {
       logger,
       signal: controller.signal,
       runCycle: async () => {
-        stats.cycles += 1;
-
         const outcome = await runPollCycle({
           logger,
           store,
@@ -82,12 +80,9 @@ async function main(): Promise<void> {
           sendMessage: (message) => runtime.napcat.sendPrivateMessage(runtime.targetQq, message),
         });
 
-        if (outcome.error === null) {
-          stats.lastSuccessAt = outcome.checkedAt;
-          stats.lastFissureCount = outcome.fetchedCount;
-        } else {
-          stats.lastErrorAt = new Date();
-        }
+        // 统计语义：只有 provider 获取失败才算「本轮出错」；
+        // NapCat 发送失败不影响「Warframe 最近成功获取时间」
+        applyPollOutcome(stats, outcome);
 
         if (config.dryRun && outcome.message !== null) {
           logger.info(`[DRY_RUN] 以下消息本应发送给已配置的 TARGET_QQ：\n${outcome.message}`);

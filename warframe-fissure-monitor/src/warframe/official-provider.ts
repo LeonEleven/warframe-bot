@@ -155,6 +155,31 @@ function describeUnparsableEntry(entry: unknown): string | null {
 }
 
 /**
+ * 构造注入给 warframe-worldstate-parser 的 logger。
+ *
+ * 为什么需要它（已核对 parser 源码）：
+ * parser 的 `defaultDeps = { sortieData, locale: 'en', logger: console }`，
+ * 构造函数会做 `{ ...defaultDeps, ...deps }`，所以**不传 logger 时它就用 console**，
+ * 于是每次 `new WorldState()` 都会往 console.debug 打印：
+ *   - "No defined kuva data, skipping data"（Kuva.mjs：我们没提供 kuvaData，必然触发）
+ *   - "No outpost data, skipping"（SentientOutpost.mjs：同理）
+ * 监控每 60 秒解析一次，会持续污染 logs/monitor.log。
+ *
+ * 这里**不使用也不覆盖 console**，而是走 parser 官方的依赖注入点，把它的日志转发到
+ * 我们自己的 logger.debug（带 [worldstate-parser] 前缀）。
+ * 已确认 parser 总共只有 3 处 logger 调用：除上面两条无害提示外，还有
+ * SyndicateJob 的 `Failed to fetch bounty rewards for ...`（真实诊断信息），
+ * 它同样会保留在 debug 级别，不会被吞掉。
+ */
+export function createParserLogger(logger?: Logger): { debug: (message: string) => void } {
+  return {
+    debug: (message: string): void => {
+      logger?.debug(`[worldstate-parser] ${message}`);
+    },
+  };
+}
+
+/**
  * 解析官方 WorldState 原始对象。
  * @throws ProviderError 整体结构不对 / parser 抛错
  */
@@ -178,7 +203,11 @@ export function parseOfficialWorldState(payload: unknown, options: ParseOfficial
 
   let worldState: WorldState;
   try {
-    worldState = new WorldState(sanitized.payload as InitialWorldState, { locale });
+    // 注入 logger，避免 parser 默认使用 console 造成每轮噪音（见 createParserLogger 说明）
+    worldState = new WorldState(sanitized.payload as InitialWorldState, {
+      locale,
+      logger: createParserLogger(logger),
+    });
   } catch (error) {
     throw new ProviderError('official', 'parse', `official WorldState 解析失败: ${describeError(error)}`, {
       cause: error,

@@ -244,6 +244,13 @@ scripts\run-monitor.cmd         # 或用启动脚本（自动写 logs\monitor.lo
 - **心跳**：默认每 6 小时一条 `info`：
   `监控运行正常 provider=official 累计轮询=57 最近成功获取=2026-09-21T02:00:00.000Z 最近一次裂缝数量=30`
   心跳**只写日志，绝不发送 QQ**。
+  `最近成功获取` 只表示「Warframe 数据获取成功」，与 QQ 是否发送成功无关：
+  NapCat 发送失败会记 `error` 日志并在下一轮重试，但不会把这一轮算成「获取失败」。
+- **parser 噪音**：`warframe-worldstate-parser` 默认会把
+  `No defined kuva data, skipping data` / `No outpost data, skipping` 直接输出到 `console.debug`。
+  本项目已通过 parser 官方的 logger 注入点把这类信息转成 `[worldstate-parser]` 前缀的 `debug` 日志，
+  因此 `logs\monitor.log` 在 `info` 级别下不会再被每 60 秒一次的无害提示刷屏；
+  需要排查时把 `LOG_LEVEL` 设为 `debug` 即可看到（parser 的真实诊断信息不会被吞掉）。
 
 ---
 

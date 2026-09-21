@@ -180,6 +180,54 @@ test('Warframe 请求失败时记录错误但不给 QQ 发送任何消息', asyn
   });
 });
 
+test('PollOutcome 明确区分「获取失败」与「通知失败」', async () => {
+  // 1) 全部成功
+  await withTempDir(async (dir) => {
+    const harness = await createHarness(dir);
+    harness.setFissures([makeFissure({ id: 'all-ok' })]);
+
+    const outcome = await harness.run();
+
+    assert.equal(outcome.fetchSucceeded, true);
+    assert.equal(outcome.fetchError, null);
+    assert.equal(outcome.notificationError, null);
+    assert.equal(outcome.error, null);
+  });
+
+  // 2) provider 获取失败
+  await withTempDir(async (dir) => {
+    const harness = await createHarness(dir);
+    harness.setFissures(async () => {
+      throw new Error('official WorldState 获取失败: HTTP 502');
+    });
+
+    const outcome = await harness.run();
+
+    assert.equal(outcome.fetchSucceeded, false);
+    assert.notEqual(outcome.fetchError, null);
+    assert.equal(outcome.notificationError, null);
+    assert.equal(outcome.error, outcome.fetchError, 'error 应回退为 fetchError');
+    assert.equal(outcome.fetchedCount, 0);
+  });
+
+  // 3) 取数据成功但 NapCat 发送失败
+  await withTempDir(async (dir) => {
+    const harness = await createHarness(dir);
+    harness.setFissures([makeFissure({ id: 'notify-fails' })]);
+    harness.setSendOk(false);
+
+    const outcome = await harness.run();
+
+    assert.equal(outcome.fetchSucceeded, true, '取数据成功不能被通知失败掩盖');
+    assert.equal(outcome.fetchError, null);
+    assert.notEqual(outcome.notificationError, null);
+    assert.equal(outcome.error, outcome.notificationError, 'error 应回退为 notificationError');
+    assert.equal(outcome.fetchedCount, 1, '获取数量仍然有效');
+    assert.equal(outcome.notified, false);
+    assert.equal(harness.store.has('notify-fails'), false, '发送失败不得写 state');
+  });
+});
+
 test('一轮中的多个新匹配裂缝合并为一条 QQ 消息', async () => {
   await withTempDir(async (dir) => {
     const harness = await createHarness(dir);

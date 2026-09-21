@@ -7,17 +7,18 @@
  */
 
 import type { Logger } from './logger.js';
+import type { PollOutcome } from './poller.js';
 
 export interface MonitorStats {
   /** 实际生效的 provider 名（auto 模式下可能回退） */
   provider: string;
   /** 累计完成轮询次数 */
   cycles: number;
-  /** 最近一次成功获取裂缝的时间 */
+  /** 最近一次成功获取 Warframe 裂缝数据的时间（与 QQ 通知是否成功无关） */
   lastSuccessAt: Date | null;
   /** 最近一次成功获取到的裂缝数量 */
   lastFissureCount: number | null;
-  /** 最近一次出错时间（Warframe 请求 / 解析失败） */
+  /** 最近一次 Warframe / provider 请求或解析失败的时间 */
   lastErrorAt: Date | null;
 }
 
@@ -29,6 +30,27 @@ export function createMonitorStats(provider: string): MonitorStats {
     lastFissureCount: null,
     lastErrorAt: null,
   };
+}
+
+/**
+ * 用一轮轮询结果更新心跳统计。
+ *
+ * 语义要点（注意区分「取数据」与「发通知」两件事）：
+ * - 只要 provider 成功返回 fissures（fetchSucceeded），就刷新 lastSuccessAt / lastFissureCount，
+ *   **即使随后 NapCat 发送失败**，也仍然算「本轮成功获取」。
+ * - 只有 Warframe / provider 请求或解析失败（!fetchSucceeded）才刷新 lastErrorAt。
+ * - NapCat 发送失败由 poller 记 error 日志并下一轮重试，不会污染 lastSuccessAt。
+ */
+export function applyPollOutcome(stats: MonitorStats, outcome: PollOutcome): void {
+  stats.cycles += 1;
+
+  if (outcome.fetchSucceeded) {
+    stats.lastSuccessAt = outcome.checkedAt;
+    stats.lastFissureCount = outcome.fetchedCount;
+    return;
+  }
+
+  stats.lastErrorAt = outcome.checkedAt;
 }
 
 /** 生成心跳日志文本（便于测试断言，不直接落盘）。 */
