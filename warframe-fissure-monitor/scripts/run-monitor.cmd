@@ -1,29 +1,46 @@
 @echo off
-rem =====================================================================
-rem  warframe-fissure-monitor 长期运行启动脚本（供 Windows 任务计划程序调用）
-rem
-rem  用法：scripts\run-monitor.cmd
-rem  说明：本文件不得包含任何敏感信息（QQ 号 / token / 代理密码），
-rem        所有配置都来自项目根目录的 .env 或系统环境变量。
-rem =====================================================================
 setlocal
 
-rem 切到项目根目录（本脚本位于 scripts\ 下）
+rem =====================================================================
+rem  warframe-fissure-monitor - long-running launcher (Task Scheduler)
+rem
+rem  Usage: scripts\run-monitor.cmd
+rem
+rem  ASCII-ONLY FILE - do not add non-ASCII characters, comments or echo
+rem  text: classic Windows cmd.exe parses batch files using the local
+rem  code page, so UTF-8 Chinese in a .cmd file can fail with mojibake
+rem  errors such as: "'<garbled>rem' is not recognized as an internal command".
+rem  Do NOT use the localized date/time pseudo variables either: they
+rem  emit locale-dependent text (for example Chinese weekday names) and
+rem  would mix encodings inside logs\monitor.log, which is otherwise
+rem  pure UTF-8 written by the Node logger.
+rem
+rem  This script must never contain credentials (QQ id / token / proxy).
+rem  All configuration comes from .env or the process environment, and
+rem  the log timestamps are produced by the Node logger itself.
+rem
+rem  Guarded by tests/run-monitor-cmd.test.ts
+rem =====================================================================
+
+rem Project root is resolved relatively from this script location
 cd /d "%~dp0.."
+if errorlevel 1 exit /b 1
 
 if not exist "logs" mkdir "logs"
 
 if not exist "dist\index.js" (
-  echo [run-monitor] 未找到 dist\index.js，请先执行: npm run build>> "logs\monitor.log"
-  echo [run-monitor] 未找到 dist\index.js，请先执行: npm run build
+  echo [run-monitor] dist\index.js not found. Run npm run build first.>>"logs\monitor.log"
+  echo [run-monitor] dist\index.js not found. Run npm run build first.
   exit /b 1
 )
 
-echo. >> "logs\monitor.log"
-echo [run-monitor] ===== 启动 %DATE% %TIME% ===== >> "logs\monitor.log"
+echo.>>"logs\monitor.log"
+echo [run-monitor] ===== START =====>>"logs\monitor.log"
 
-node "dist\index.js" >> "logs\monitor.log" 2>&1
-set EXIT_CODE=%ERRORLEVEL%
+rem Node writes its own UTF-8 log lines (including timestamps) here
+node "dist\index.js" >>"logs\monitor.log" 2>&1
+set "EXIT_CODE=%ERRORLEVEL%"
 
-echo [run-monitor] ===== 退出 %DATE% %TIME% exitcode=%EXIT_CODE% ===== >> "logs\monitor.log"
+echo [run-monitor] ===== EXIT code=%EXIT_CODE% =====>>"logs\monitor.log"
+
 exit /b %EXIT_CODE%

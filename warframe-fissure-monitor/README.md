@@ -224,6 +224,13 @@ scripts\run-monitor.cmd         # 或用启动脚本（自动写 logs\monitor.lo
    - **不要**勾选"运行超过 N 天自动停止"
 4. `scripts\run-monitor.cmd` 会自动 `cd` 到项目根目录、创建 `logs\`、把 stdout/stderr 追加写入 `logs\monitor.log`；脚本内**不含任何 QQ 号 / token / 代理密码**（全部来自 `.env`）。
 
+> **`scripts\run-monitor.cmd` 故意保持 ASCII-only**（纯英文注释与 echo、CRLF 换行、不使用 `%DATE%` / `%TIME%`）。
+> 原因：传统 Windows `cmd.exe` 按**系统本地代码页**解析批处理文件，脚本里出现 UTF-8 中文时会报出
+> `'嬪簭璋冪敤锛?rem' 不是内部或外部命令` 之类的乱码错误导致启动失败；而 `%DATE%` / `%TIME%` 会写出
+> 「周一」这类本地化文本，与 Node 写出的 UTF-8 日志混在同一个文件里造成混合编码。
+> 因此**不要**给这个脚本加中文注释、中文 echo 或本地化日期时间；时间戳统一由 Node logger 输出。
+> `tests/run-monitor-cmd.test.ts` 会守护这条约束（ASCII-only / CRLF / 无 `%DATE%` / 无绝对路径 / 无凭据）。
+
 关于唤醒：
 
 - **PowerToys Awake 可防止笔记本睡眠**（用于长时间挂机）。
@@ -251,6 +258,32 @@ scripts\run-monitor.cmd         # 或用启动脚本（自动写 logs\monitor.lo
   本项目已通过 parser 官方的 logger 注入点把这类信息转成 `[worldstate-parser]` 前缀的 `debug` 日志，
   因此 `logs\monitor.log` 在 `info` 级别下不会再被每 60 秒一次的无害提示刷屏；
   需要排查时把 `LOG_LEVEL` 设为 `debug` 即可看到（parser 的真实诊断信息不会被吞掉）。
+
+### 日志编码与查看方式
+
+`logs\monitor.log` 里的内容是**两种来源、编码分工明确**的：
+
+| 写入方 | 内容 | 编码 |
+|---|---|---|
+| `run-monitor.cmd` | `[run-monitor] ===== START =====`、`===== EXIT code=N =====` | **纯 ASCII**（刻意不含日期时间与中文字符） |
+| Node logger | 监控日志（含中文文案与 ISO 时间戳） | **UTF-8** |
+
+cmd 写入的那几行是纯 ASCII，UTF-8 与本地代码页对它们的字节解释完全一致，所以整个文件不会再出现混合编码乱码；
+所有中文都来自 Node，始终是 UTF-8。时间戳也统一由 Node logger 输出，cmd 不再生成本地化时间。
+
+查看日志：
+
+```powershell
+# Windows PowerShell 5.1：显式指定 UTF8，避免中文显示为乱码
+Get-Content .\logs\monitor.log -Encoding UTF8 -Tail 50
+
+# 实时跟踪
+Get-Content .\logs\monitor.log -Encoding UTF8 -Tail 20 -Wait
+```
+
+> PowerShell 7 默认就是 UTF-8，行为通常更友好（`Get-Content .\logs\monitor.log -Tail 50` 即可）；
+> 但本项目**不要求**你安装 PowerShell 7，Windows 自带的 5.1 配合 `-Encoding UTF8` 完全够用。
+> 用记事本 / VS Code 打开日志时请选择 UTF-8 编码。
 
 ---
 
@@ -348,4 +381,5 @@ CI **不读取真实 `.env`，不需要 `TARGET_QQ` / `NAPCAT_TOKEN`，不调用
 | 收不到通知但 `check` 显示有匹配 | 看 `data/state.json` 是否已记录该裂缝，或 `DRY_RUN=true`。 |
 | 想先观察不发送 | `$env:DRY_RUN='true'; npm start`（日志会打印本应发送的完整消息）。 |
 | 日志文件在哪 | `logs\monitor.log`（用 `scripts\run-monitor.cmd` 启动时）；前台运行则直接输出到控制台。 |
+| 运行 `scripts\run-monitor.cmd` 报 `'嬪簭璋冪敤锛?rem' 不是内部或外部命令` 之类乱码 | 说明批处理文件里被写入了非 ASCII 字符。`run-monitor.cmd` 必须保持 ASCII-only + CRLF，不要添加中文注释/echo；先跑 `npm test`（`tests/run-monitor-cmd.test.ts` 会指出问题）。 |
 | 接口字段变了 | 解析层已做兼容（`missionTypeKey ?? missionKey ?? missionType`、`nodeKey ?? node`、unknown 保持 null），单条脏数据只跳过该条并记 `warn` 日志。 |
