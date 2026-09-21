@@ -8,8 +8,9 @@ dist/
 .env.local
 .env.*.local
 
-# 运行时状态（已通知的裂缝 ID）
+# 运行时状态（已通知的裂缝 ID + 单实例锁）
 data/
+logs/
 *.log
 
 # 编辑器 / 系统

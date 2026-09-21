@@ -194,8 +194,8 @@ test('一轮中的多个新匹配裂缝合并为一条 QQ 消息', async () => {
 
     assert.equal(harness.sent.length, 1, '多条新裂缝只发一条消息');
     const message = harness.sent[0] ?? '';
-    assert.match(message, /Ani \(Void\)/);
-    assert.match(message, /Mot \(Void\)/);
+    assert.match(message, /阿尼（Ani）/);
+    assert.match(message, /默特（Mot）/);
     assert.doesNotMatch(message, /Taveuni/);
     assert.equal(outcome.pendingCount, 2);
     assert.equal(harness.store.has('a'), true);
@@ -214,7 +214,7 @@ test('DRY_RUN 只生成消息，不发送也不写状态', async () => {
     assert.equal(harness.sent.length, 0);
     assert.equal(outcome.notified, false);
     assert.notEqual(outcome.message, null);
-    assert.match(outcome.message ?? '', /Ani \(Void\)/);
+    assert.match(outcome.message ?? '', /阿尼（Ani）/);
     assert.equal(harness.store.has('dry-run-case'), false);
     assert.equal(await harness.exists(), false);
   });

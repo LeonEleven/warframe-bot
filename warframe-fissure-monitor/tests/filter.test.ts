@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  countSteelPathFissures,
   isSurvivalMission,
   isVoidNode,
   matchesFissureCriteria,
@@ -103,6 +104,35 @@ test('isSurvivalMission 只认 Survival', () => {
 
 test('normalizeLabel 合并空白', () => {
   assert.equal(normalizeLabel('  Ani    (Void) '), 'Ani (Void)');
+});
+
+test('isHard 为 unknown（null）时不匹配：绝不把 unknown 当作 false', () => {
+  assert.equal(matchesFissureCriteria(makeFissure({ isHard: null }), FIXED_NOW), false);
+});
+
+test('isStorm 为 unknown（null）时不匹配：绝不把 unknown 当作「确定不是 Void Storm」', () => {
+  assert.equal(matchesFissureCriteria(makeFissure({ isStorm: null }), FIXED_NOW), false);
+});
+
+test('Steel Path 与 Void Storm 都明确时才可能匹配', () => {
+  const known = makeFissure({ isHard: true, isStorm: false });
+  const unknownStorm = makeFissure({ isHard: true, isStorm: null });
+  const unknownHard = makeFissure({ isHard: null, isStorm: false });
+
+  assert.equal(matchesFissureCriteria(known, FIXED_NOW), true);
+  assert.equal(matchesFissureCriteria(unknownStorm, FIXED_NOW), false);
+  assert.equal(matchesFissureCriteria(unknownHard, FIXED_NOW), false);
+});
+
+test('countSteelPathFissures 只统计明确 isHard === true 的裂缝', () => {
+  const fissures = [
+    makeFissure({ id: 'a', isHard: true }),
+    makeFissure({ id: 'b', isHard: false }),
+    makeFissure({ id: 'c', isHard: null }),
+    makeFissure({ id: 'd', isHard: true }),
+  ];
+
+  assert.equal(countSteelPathFissures(fissures), 2);
 });
 
 test('selectMatchingFissures 只保留匹配项且保持顺序', () => {

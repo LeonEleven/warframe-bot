@@ -2,10 +2,11 @@
  * 测试公共工具。
  */
 
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Logger, LogLevel } from '../src/logger.js';
+import type { FetchLike, FetchLikeInit } from '../src/warframe/http.js';
 import type { Fissure } from '../src/types.js';
 
 /** 测试中统一使用的“当前时间” */
@@ -130,3 +131,46 @@ export function recordingFetch(response: Response): { calls: RecordedCall[]; fet
   });
   return { calls, fetch: impl };
 }
+
+/* ------------------------------------------------------------------ *
+ * provider / HTTP 相关测试工具
+ * ------------------------------------------------------------------ */
+
+export interface RecordedProviderCall {
+  url: string;
+  init?: FetchLikeInit;
+}
+
+export interface FetchStub {
+  fetch: FetchLike;
+  calls: RecordedProviderCall[];
+  urls(): string[];
+}
+
+/** 构造一个记录调用并可自定义响应的 FetchLike 替身。 */
+export function createFetchStub(
+  handler: (url: string, init?: FetchLikeInit) => Response | Promise<Response>,
+): FetchStub {
+  const calls: RecordedProviderCall[] = [];
+  const impl: FetchLike = async (url, init) => {
+    calls.push(init === undefined ? { url } : { url, init });
+    return handler(url, init);
+  };
+  return { fetch: impl, calls, urls: () => calls.map((call) => call.url) };
+}
+
+/** 永远失败（网络异常）的 fetch。 */
+export function failingFetch(message = 'connect ECONNREFUSED'): FetchStub {
+  return createFetchStub(() => {
+    throw new Error(message);
+  });
+}
+
+/** 读取仓库内保存的最小官方 WorldState fixture。 */
+export async function loadWorldStateFixture(): Promise<unknown> {
+  const raw = await readFile(new URL('./fixtures/worldstate.fissures.json', import.meta.url), 'utf8');
+  return JSON.parse(raw) as unknown;
+}
+
+export const WORLDSTATE_FIXTURE_FETCHED_AT = new Date('2026-09-21T00:40:00.000Z');
+

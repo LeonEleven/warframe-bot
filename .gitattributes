@@ -1,0 +1,9 @@
+# Windows 批处理脚本必须使用 CRLF，避免 cmd.exe 解析异常
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 其余文本文件统一用 LF 存储
+*.ts  text eol=lf
+*.json text eol=lf
+*.md  text eol=lf
+*.yml text eol=lf

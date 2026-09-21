@@ -4,8 +4,11 @@ node_modules/
 # 构建产物
 dist/
 
-# 运行状态（已通知的裂缝 ID）
+# 运行状态（已通知的裂缝 ID + 单实例锁）
 data/
+
+# 长期运行日志（run-monitor.cmd 写入）
+logs/
 
 # 本地环境变量（含 QQ 号 / token，绝不提交）
 .env

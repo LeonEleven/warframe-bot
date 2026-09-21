@@ -1,0 +1,108 @@
+{
+  "ProjectPct": [],
+  "Tmp": "{\"pgr\":{\"ts\":\"1786549500\",\"en\":\"fixture for warframe-fissure-monitor tests\"}}",
+  "ActiveMissions": [
+    {
+      "_id": {
+        "$oid": "6ab08642c9707fa2eb1e9425"
+      },
+      "Region": 15,
+      "Seed": 45382,
+      "Activation": {
+        "$date": {
+          "$numberLong": "1789953602318"
+        }
+      },
+      "Expiry": {
+        "$date": {
+          "$numberLong": "1789957482576"
+        }
+      },
+      "Node": "SolNode409",
+      "MissionType": "MT_SURVIVAL",
+      "Modifier": "VoidT4",
+      "Hard": true
+    },
+    {
+      "_id": {
+        "$oid": "fixture0000000000000001"
+      },
+      "Region": 22,
+      "Seed": 60438,
+      "Activation": {
+        "$date": {
+          "$numberLong": "1789950662382"
+        }
+      },
+      "Expiry": {
+        "$date": {
+          "$numberLong": "1789957736086"
+        }
+      },
+      "Node": "SolNode405",
+      "MissionType": "MT_SURVIVAL",
+      "Modifier": "VoidT3",
+      "Hard": true
+    },
+    {
+      "_id": {
+        "$oid": "6ab07feeb764fe1d3400fdc5"
+      },
+      "Region": 15,
+      "Seed": 82474,
+      "Activation": {
+        "$date": {
+          "$numberLong": "1789951982417"
+        }
+      },
+      "Expiry": {
+        "$date": {
+          "$numberLong": "1789958560157"
+        }
+      },
+      "Node": "SolNode408",
+      "MissionType": "MT_DEFENSE",
+      "Modifier": "VoidT3"
+    },
+    {
+      "_id": {
+        "$oid": "fixture0000000000000002"
+      },
+      "Region": 22,
+      "Seed": 60438,
+      "Activation": {
+        "$date": {
+          "$numberLong": "1789950662382"
+        }
+      },
+      "Expiry": {
+        "$date": {
+          "$numberLong": "1789957736086"
+        }
+      },
+      "Node": "SolNode181",
+      "MissionType": "MT_SURVIVAL",
+      "Modifier": "VoidT4",
+      "Hard": true
+    }
+  ],
+  "VoidStorms": [
+    {
+      "_id": {
+        "$oid": "6ab07ce268df38ce0bcd4e2c"
+      },
+      "Node": "CrewBattleNode518",
+      "Activation": {
+        "$date": {
+          "$numberLong": "1789953603351"
+        }
+      },
+      "Expiry": {
+        "$date": {
+          "$numberLong": "1789959003351"
+        }
+      },
+      "ActiveMissionTier": "VoidT1"
+    }
+  ]
+}

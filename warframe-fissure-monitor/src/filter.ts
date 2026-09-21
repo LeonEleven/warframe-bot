@@ -4,9 +4,14 @@
  * 命中条件（必须同时满足）：
  *   1. isHard === true            （Steel Path）
  *   2. isStorm === false          （非 Void Storm）
- *   3. missionType === "Survival" （生存任务）
+ *   3. missionType === "Survival" （生存任务，英文规范值）
  *   4. 节点名以 "(Void)" 结尾      （虚空节点，动态判断，不硬编码 Ani / Mot）
  *   5. expiry > 当前时间           （尚未过期）
+ *
+ * 注意 unknown 语义：
+ *   isHard / isStorm 为 null（上游未给出该字段）时一律「不匹配」，
+ *   绝不把 unknown 当成 false。因此这里一律使用 === 严格比较。
+ * 节点中文名（阿尼 / 默特）只用于显示，绝不参与匹配。
  */
 
 import type { Fissure } from './types.js';
@@ -54,4 +59,9 @@ export function matchesFissureCriteria(fissure: Fissure, now: Date = new Date())
 /** 过滤出所有满足条件的裂缝（保持原顺序）。 */
 export function selectMatchingFissures(fissures: readonly Fissure[], now: Date = new Date()): Fissure[] {
   return fissures.filter((fissure) => matchesFissureCriteria(fissure, now));
+}
+
+/** 供 check / 统计使用：明确标记为 Steel Path 的裂缝数量（unknown 不计入）。 */
+export function countSteelPathFissures(fissures: readonly Fissure[]): number {
+  return fissures.filter((fissure) => fissure.isHard === true).length;
 }

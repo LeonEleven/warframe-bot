@@ -1,16 +1,19 @@
 /**
- * Warframe API 响应的 zod 校验 + 归一化。
+ * WarframeStat.us /fissures 响应的 zod 校验 + 归一化。
  *
  * 兼容性处理：
- * - missionType = fissure.missionTypeKey ?? fissure.missionType
- * - node        = fissure.nodeKey        ?? fissure.node
- * - isHard / isStorm 缺失时按 false 处理（保守：宁可不通知）
+ * - missionType = missionTypeKey ?? missionKey ?? missionType
+ * - node        = nodeKey        ?? node
+ * - isHard / isStorm 缺失时保持 **unknown（null）**，绝不猜测成 false。
+ *   上游没给出字段时必须视为未知，否则 unknown 会被误判成「确定不是 Void Storm」。
+ *   真正匹配由 filter 用 === true / === false 严格判断。
  * - 单条记录解析失败只跳过该条，不影响整批数据
  * - 同时接受 [...] 与 { fissures: [...] } 两种响应外形
  */
 
 import { z } from 'zod';
 import type { Fissure } from '../types.js';
+import { firstNonEmpty, strictBoolean, toTierNumber } from './mapping.js';
 
 export class WarframeResponseFormatError extends Error {
   constructor(message: string) {
@@ -28,12 +31,15 @@ export const rawFissureSchema = z.object({
   nodeKey: z.string().optional(),
   missionType: z.string().optional(),
   missionTypeKey: z.string().optional(),
+  /** 部分版本/镜像只提供 missionKey（例如 "Survival"） */
+  missionKey: z.string().optional(),
   enemy: z.string().optional(),
   tier: z.string().optional(),
-  tierNum: z.number().optional(),
+  tierNum: z.union([z.number(), z.string()]).optional(),
   isHard: z.boolean().optional(),
   isStorm: z.boolean().optional(),
 });
+
 
 export type RawFissure = z.infer<typeof rawFissureSchema>;
 
@@ -50,13 +56,6 @@ export interface FissureParseResult {
 const responseWrapperSchema = z.object({
   fissures: z.array(z.unknown()),
 });
-
-function firstNonEmpty(...values: Array<string | undefined>): string | null {
-  for (const value of values) {
-    if (value !== undefined && value.trim() !== '') return value.trim();
-  }
-  return null;
-}
 
 function extractList(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
@@ -79,8 +78,9 @@ function normalizeFissure(raw: RawFissure): NormalizeOutcome {
   const node = firstNonEmpty(raw.nodeKey, raw.node);
   if (node === null) return { ok: false, reason: '缺少 node / nodeKey 字段' };
 
-  const missionType = firstNonEmpty(raw.missionTypeKey, raw.missionType);
-  if (missionType === null) return { ok: false, reason: '缺少 missionType / missionTypeKey 字段' };
+  // 英文规范值优先：missionTypeKey -> missionKey -> missionType
+  const missionType = firstNonEmpty(raw.missionTypeKey, raw.missionKey, raw.missionType);
+  if (missionType === null) return { ok: false, reason: '缺少 missionType / missionTypeKey / missionKey 字段' };
 
   const expiryMs = Date.parse(raw.expiry);
   if (!Number.isFinite(expiryMs)) {
@@ -101,9 +101,10 @@ function normalizeFissure(raw: RawFissure): NormalizeOutcome {
       missionTypeKey: firstNonEmpty(raw.missionTypeKey),
       enemy: firstNonEmpty(raw.enemy),
       tier: firstNonEmpty(raw.tier) ?? 'Unknown',
-      tierNum: raw.tierNum ?? null,
-      isHard: raw.isHard === true,
-      isStorm: raw.isStorm === true,
+      tierNum: toTierNumber(raw.tierNum),
+      // 缺失 => unknown(null)，绝不猜测成 false
+      isHard: strictBoolean(raw.isHard),
+      isStorm: strictBoolean(raw.isStorm),
     },
   };
 }

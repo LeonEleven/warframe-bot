@@ -83,11 +83,11 @@ export async function runPollCycle(dependencies: PollDependencies): Promise<Poll
   }
   outcome.fetchedCount = fissures.length;
 
-  // 3) 匹配条件
+  // 3) 匹配条件（无匹配属于常态，用 debug 避免 60 秒一条的噪音日志）
   const matched = selectMatchingFissures(fissures, now);
   outcome.matchedCount = matched.length;
   if (matched.length === 0) {
-    logger.info(`本轮共 ${fissures.length} 条裂缝，没有匹配项`);
+    logger.debug(`本轮共 ${fissures.length} 条裂缝，没有匹配项`);
     return outcome;
   }
 
@@ -95,16 +95,16 @@ export async function runPollCycle(dependencies: PollDependencies): Promise<Poll
   const pending = matched.filter((fissure) => !store.has(fissure.id));
   outcome.pendingCount = pending.length;
   if (pending.length === 0) {
-    logger.info(`匹配 ${matched.length} 条裂缝，但均已通知过，跳过`);
+    logger.debug(`匹配 ${matched.length} 条裂缝，但均已通知过，跳过`);
     return outcome;
   }
 
   const message = buildNotificationMessage(pending, now);
   outcome.message = message;
 
-  // 5) dry run：只打印
+  // 5) dry run：只打印数量，完整消息由调用方（index）输出，避免日志里出现两份
   if (dryRun) {
-    logger.info(`[DRY_RUN] 检测到 ${pending.length} 条新的匹配裂缝，未发送 QQ 消息：\n${message}`);
+    logger.info(`[DRY_RUN] 检测到 ${pending.length} 条新的匹配裂缝，未发送 QQ 消息`);
     return outcome;
   }
 
