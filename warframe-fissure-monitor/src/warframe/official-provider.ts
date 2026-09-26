@@ -25,7 +25,7 @@ import { WorldState, type Fissure as ParserFissure, type InitialWorldState } fro
 import { describeError, type Logger } from '../logger.js';
 import type { Fissure } from '../types.js';
 import { DEFAULT_WORLDSTATE_URL } from './defaults.js';
-import { httpGetText, type FetchLike } from './http.js';
+import { httpGetText, type FetchLike, type HttpRetryPolicy, type SleepFunction } from './http.js';
 import { firstNonEmpty, strictBoolean, toIsoOrNull, toTierNumber } from './mapping.js';
 import { ProviderError, type FissureFetchResult, type FissureProvider } from './provider.js';
 
@@ -45,9 +45,13 @@ export interface OfficialProviderOptions {
   /** 解析用 locale，默认 'en'；仅影响 parser 输出的显示名，不影响筛选 */
   locale?: WorldStateLocale;
   fetchImpl?: FetchLike;
-  /** 仅在配置了 WARFRAME_PROXY_URL 时传入 */
+  /** Warframe 专用 dispatcher（直连 Agent 或 ProxyAgent）；NapCat 永不使用 */
   dispatcher?: unknown;
   logger?: Logger;
+  /** 重试策略覆盖（默认 3 次尝试 / 1s、3s 退避），便于测试 */
+  retry?: Partial<HttpRetryPolicy>;
+  /** 便于测试注入的 sleep（默认真实等待） */
+  sleep?: SleepFunction;
 }
 
 type MapOutcome = { ok: true; fissure: Fissure } | { ok: false; reason: string };
@@ -254,6 +258,8 @@ export class OfficialWorldStateProvider implements FissureProvider {
   private readonly fetchImpl: FetchLike | undefined;
   private readonly dispatcher: unknown;
   private readonly logger: Logger | undefined;
+  private readonly retry: Partial<HttpRetryPolicy> | undefined;
+  private readonly sleep: SleepFunction | undefined;
 
   constructor(options: OfficialProviderOptions) {
     this.url = options.url ?? DEFAULT_WORLDSTATE_URL;
@@ -262,17 +268,24 @@ export class OfficialWorldStateProvider implements FissureProvider {
     this.fetchImpl = options.fetchImpl;
     this.dispatcher = options.dispatcher;
     this.logger = options.logger;
+    this.retry = options.retry;
+    this.sleep = options.sleep;
   }
 
   async fetchFissures(): Promise<FissureFetchResult> {
     let body: string;
     try {
+      // 有限重试（默认 3 次尝试、1s/3s 退避）在这里完成；
+      // official 全部失败后，auto 模式才会 fallback 到 warframestat。
       body = await httpGetText({
         url: this.url,
         timeoutMs: this.timeoutMs,
         label: 'official WorldState',
         fetchImpl: this.fetchImpl,
         dispatcher: this.dispatcher,
+        logger: this.logger,
+        retry: this.retry,
+        sleep: this.sleep,
       });
     } catch (error) {
       throw new ProviderError('official', 'request', `official WorldState 获取失败: ${describeError(error)}`, {

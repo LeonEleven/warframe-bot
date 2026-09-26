@@ -10,7 +10,7 @@
 
 import { describeError, type Logger } from '../logger.js';
 import { DEFAULT_WARFRAMESTAT_API_URL } from './defaults.js';
-import { httpGetText, parseJsonBody, type FetchLike } from './http.js';
+import { httpGetText, parseJsonBody, type FetchLike, type HttpRetryPolicy, type SleepFunction } from './http.js';
 import { ProviderError, type FissureFetchResult, type FissureProvider } from './provider.js';
 import { parseFissuresResponse } from './schema.js';
 
@@ -20,9 +20,13 @@ export interface WarframeStatProviderOptions {
   url?: string;
   timeoutMs: number;
   fetchImpl?: FetchLike;
-  /** 仅在配置了 WARFRAME_PROXY_URL 时传入 */
+  /** Warframe 专用 dispatcher（直连 Agent 或 ProxyAgent）；NapCat 永不使用 */
   dispatcher?: unknown;
   logger?: Logger;
+  /** 重试策略覆盖（默认 3 次尝试 / 1s、3s 退避），便于测试 */
+  retry?: Partial<HttpRetryPolicy>;
+  /** 便于测试注入的 sleep（默认真实等待） */
+  sleep?: SleepFunction;
 }
 
 export class WarframeStatProvider implements FissureProvider {
@@ -33,6 +37,8 @@ export class WarframeStatProvider implements FissureProvider {
   private readonly fetchImpl: FetchLike | undefined;
   private readonly dispatcher: unknown;
   private readonly logger: Logger | undefined;
+  private readonly retry: Partial<HttpRetryPolicy> | undefined;
+  private readonly sleep: SleepFunction | undefined;
 
   constructor(options: WarframeStatProviderOptions) {
     this.url = options.url ?? DEFAULT_WARFRAMESTAT_API_URL;
@@ -40,6 +46,8 @@ export class WarframeStatProvider implements FissureProvider {
     this.fetchImpl = options.fetchImpl;
     this.dispatcher = options.dispatcher;
     this.logger = options.logger;
+    this.retry = options.retry;
+    this.sleep = options.sleep;
   }
 
   async fetchFissures(): Promise<FissureFetchResult> {
@@ -51,6 +59,9 @@ export class WarframeStatProvider implements FissureProvider {
         label: 'WarframeStat.us',
         fetchImpl: this.fetchImpl,
         dispatcher: this.dispatcher,
+        logger: this.logger,
+        retry: this.retry,
+        sleep: this.sleep,
       });
     } catch (error) {
       throw new ProviderError('warframestat', 'request', `WarframeStat.us 获取失败: ${describeError(error)}`, {

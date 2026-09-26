@@ -134,6 +134,32 @@ Get-Item "$env:TEMP\wf-worldstate.json" | Select-Object Length
 (Get-Content "$env:TEMP\wf-worldstate.json" -Raw | ConvertFrom-Json).ActiveMissions | Select-Object -First 3
 ```
 
+### Warframe HTTP 稳定性（直连优先 + 有限重试）
+
+- **默认直连**，不需要代理；`WARFRAME_PROXY_URL` 仍然只是**可选备用**，正常情况保持留空即可。
+- 直连时使用**专用 undici Agent**（进程启动时创建一次，所有请求复用，不会每轮新建），
+  开启 IPv4/IPv6 family autoselection：`autoSelectFamily: true` + `autoSelectFamilyAttemptTimeout: 250ms`。
+  **不强制 IPv4**（不设置 `family: 4`）—— 当前 IPv4 可用，但没有证据表明应当永久禁用 IPv6；
+  开启 autoselection 更能覆盖间歇性 DNS / CDN / 网络路径抖动。
+- 请求失败会**有限重试**（GET 是幂等的）：最多 **3 次尝试**，退避 **1s / 3s**，
+  单次尝试超时仍是 `HTTP_TIMEOUT_MS`（默认 10s，**没有**被调大）。
+  最坏耗时约 `10 + 1 + 10 + 3 + 10 = 34s`，仍在 60s 轮询间隔内；
+  而且 poller 是「上一轮完全结束后再等待」，因此不会出现轮询重叠。
+- **只重试瞬时故障**：
+  - 网络类：`TimeoutError`、`UND_ERR_CONNECT_TIMEOUT`、`ETIMEDOUT`、`ECONNRESET`、`ECONNREFUSED`、
+    `ENETUNREACH`、`EHOSTUNREACH`、`EAI_AGAIN` 等（会递归检查 `cause` 链与 `AggregateError.errors`）；
+  - HTTP：`408 / 425 / 429 / 500 / 502 / 503 / 504` 及其它 5xx；
+  - 200 却返回空响应（CDN 抖动的典型症状）；
+  - `429 / 503` 带 `Retry-After` 时会被遵守，但有 10 秒上限。
+- **不重试**：`400 / 401 / 403 / 404` 等客户端错误、响应体积异常，
+  以及 JSON 解析 / WorldState parser / 业务映射失败（这些不是网络瞬时错误）。
+- 日志语义：中间失败只记 **`WARN`**（`attempt=1/3 retryInMs=1000 ...`），
+  重试后成功记一条 **`INFO`**（`official WorldState 在第 2/3 次尝试成功`），
+  连续失败到上限才由 poller 记 **`ERROR`**；错误信息里带错误链的 `name`/`code` 便于诊断。
+- **获取失败不会给 QQ 发送任何故障消息**（保持既有语义）：只写日志，下一轮继续重试。
+- 该 dispatcher **只用于 Warframe 请求**；NapCat（`127.0.0.1:3000`）永远直连，
+  绝不经过代理或这个 Agent。
+
 ---
 
 ## 3. 配置项（全部来自 `.env`）
@@ -469,7 +495,7 @@ warframe-fissure-monitor/
 │  │  ├─ http.ts  proxy.ts        # 内置超时 + 可选 undici ProxyAgent
 │  │  └─ defaults.ts
 │  └─ scripts/{check,test-notification}.ts
-└─ tests/                         # 171 个用例（含最小 WorldState fixture 与部署脚本守护/行为测试）
+└─ tests/                         # 208 个用例（含最小 WorldState fixture 与部署脚本守护/行为测试）
    └─ fixtures/worldstate.fissures.json
 ```
 
@@ -477,7 +503,7 @@ warframe-fissure-monitor/
 
 ## 8. 测试覆盖
 
-`npm test`（171 个用例，全部离线、不需要真实 .env / NapCat / QQ / Warframe API / 代理 / 计划任务）：
+`npm test`（208 个用例，全部离线、不需要真实 .env / NapCat / QQ / Warframe API / 代理 / 计划任务）：
 
 - 匹配规则：5 个条件的正例与各种反例（含 `isHard`/`isStorm` 为 unknown 时不匹配）
 - **Official provider**：从保存的最小 WorldState fixture 解析、`Hard=true → isHard=true`、`ActiveMissionTier → isStorm=true`、普通裂缝 `isStorm=false`、请求失败 / HTTP 500 / HTML 拦截 / 缺少字段 / 单条脏数据只跳过该条
@@ -489,6 +515,13 @@ warframe-fissure-monitor/
 - **单实例锁**：存活 PID 拒绝第二实例、stale lock 自愈、损坏锁文件自愈、release 不删他人锁
 - **心跳**：间隔控制与内容，反复触发心跳**绝不调用 NapCat**
 - **代理隔离**：启用代理时 Warframe 请求带 dispatcher、NapCat 请求绝无 dispatcher；日志与配置描述不含代理凭据
+- **HTTP 稳定性**（`tests/http-retry.test.ts`，20 个用例）：第 1 次超时后成功 / 前 2 次超时后成功 /
+  3 次全失败只抛一次错、`503` 与 `429` 会重试、`403`/`404` 不重试、JSON 解析失败不触发 HTTP 重试、
+  退避恰为 1s/3s（fake sleep，不真实等待）、`Retry-After` 被遵守且有 10s 上限、
+  错误链（含嵌套 cause 与 `AggregateError`）能识别 `UND_ERR_CONNECT_TIMEOUT` / `ETIMEDOUT` 等 code、
+  首次成功无额外日志 / 重试后成功记一条 INFO / 中间失败只记 WARN；
+  另有直连 Agent 断言（`autoSelectFamily=true`、`autoSelectFamilyAttemptTimeout=250`、**不强制 family=4**）、
+  `createWarframeDispatcher` 的无代理→直连 Agent / 有代理→ProxyAgent、以及 NapCat 永远拿不到该 dispatcher
 - 长期运行：顺序轮询不重叠、单轮异常不终止循环
 - **计划任务脚本静态守护**（`tests/scheduled-task-scripts.test.ts`，15 个用例）：四个脚本同名任务、
   原生 `PT60S` 延迟（禁止 sleep/timeout 模拟）、`IgnoreNew`、`PT0S` 无限执行时限、`PT1M×3` 失败重启、
@@ -523,6 +556,8 @@ CI **不读取真实 `.env`，不需要 `TARGET_QQ` / `NAPCAT_TOKEN`，不调用
 | 现象 | 处理 |
 |------|------|
 | `official WorldState 请求失败` | 先按第 2 节用 `curl.exe` 验证能否直连。若确实不通：改 `WARFRAME_SOURCE=auto`（会回退 WarframeStat.us），或设置 `WARFRAME_PROXY_URL`（只影响 Warframe 请求）。 |
+| Warframe 请求偶尔超时（`TimeoutError`） | 属间歇性 DNS / CDN / 网络路径抖动：程序会在同一轮内**有限重试**（3 次、1s/3s 退避）。日志出现 `WARN ... Warframe 请求失败，准备重试 attempt=1/3` 说明正在自愈；只有 3 次都失败才会记 `ERROR`，且**不会给 QQ 发送消息**，下一轮自动继续。 |
+| 想确认重试是否生效 | 看 `logs\monitor.log` 中的 `attempt=1/3` / `在第 2/3 次尝试成功`；把 `LOG_LEVEL` 设为 `debug` 还能看到带错误链 `name`/`code` 的诊断（如 `code=UND_ERR_CONNECT_TIMEOUT`）。 |
 | `HTTP 403 Forbidden`（仅 WarframeStat.us） | 该站点在部分网络被 Cloudflare 拦截，属正常现象；保持默认 `official` 即可。 |
 | `已有监控实例正在运行（pid=...）` | 已有实例在跑（任务计划程序或另一个窗口）。确认后停止旧实例；若确认进程已死，重新启动会自动清理 stale lock。 |
 | `NapCat 发送失败: status=failed, retcode=...` | 检查 NapCat HTTP 服务是否启用、端口/token 是否与 `.env` 一致、`TARGET_QQ` 是否为机器人好友。失败不会写状态，下一轮会自动重试。 |

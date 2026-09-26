@@ -13,9 +13,14 @@ import { buildFissureProviderBundle, buildRuntime } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { hasEmbeddedCredentials, redactUrl } from '../src/redact.js';
 import {
+  createDirectDispatcher,
   createProxyDispatcher,
+  createWarframeDispatcher,
+  describeDispatcherKind,
   describeProxy,
+  DIRECT_DISPATCHER_OPTIONS,
   isHttpProxyUrl,
+  isProxyDispatcher,
   ProxyConfigError,
 } from '../src/warframe/proxy.js';
 import {
@@ -89,7 +94,7 @@ test('启用代理时：Warframe 请求带 dispatcher，NapCat 请求绝不带 d
   assert.equal(napcat.calls[0]?.url, 'http://127.0.0.1:3000/send_private_msg');
 });
 
-test('未配置代理时：Warframe 请求也不带 dispatcher（默认零配置可直连）', async () => {
+test('未配置代理时：Warframe 请求使用专用直连 Agent（autoSelectFamily），NapCat 仍无 dispatcher', async () => {
   const fixture = await loadWorldStateFixture();
   const logger = createMemoryLogger();
   const config = buildConfig({ TARGET_QQ: '10001' });
@@ -105,8 +110,39 @@ test('未配置代理时：Warframe 请求也不带 dispatcher（默认零配置
   await runtime.provider.fetchFissures();
   await runtime.napcat.sendPrivateMessage(runtime.targetQq, 'test');
 
-  assert.equal(warframe.calls[0]?.init?.dispatcher, undefined);
+  const dispatcher = warframe.calls[0]?.init?.dispatcher as { constructor: { name: string } } | undefined;
+  assert.ok(dispatcher !== undefined, '直连时也应使用专用 dispatcher（而不是 undici 默认）');
+  assert.notEqual(dispatcher.constructor.name, 'ProxyAgent', '未配置代理时不得使用 ProxyAgent');
+  assert.match(runtime.dispatcherKind, /DirectAgent/);
+  assert.ok(runtime.dispatcherKind.includes('autoSelectFamily=true'));
+
+  // NapCat 永远拿不到 Warframe dispatcher
   assert.equal(napcat.calls[0]?.init?.dispatcher, undefined);
+  assert.equal(Object.hasOwn(napcat.calls[0]?.init ?? {}, 'dispatcher'), false);
+});
+
+test('直连 Agent 选项：autoSelectFamily=true / 250ms，且不强制 family=4', () => {
+  assert.deepEqual({ ...DIRECT_DISPATCHER_OPTIONS }, { autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 250 });
+  assert.equal(DIRECT_DISPATCHER_OPTIONS.autoSelectFamily, true);
+  assert.equal(DIRECT_DISPATCHER_OPTIONS.autoSelectFamilyAttemptTimeout, 250);
+  assert.ok(!Object.hasOwn(DIRECT_DISPATCHER_OPTIONS, 'family'), '不得强制 IPv4（family: 4）');
+  assert.notEqual((DIRECT_DISPATCHER_OPTIONS as { family?: number }).family, 4);
+
+  const direct = createDirectDispatcher();
+  assert.equal(direct.constructor.name, 'Agent');
+  assert.equal(isProxyDispatcher(direct), false);
+  assert.match(describeDispatcherKind(direct), /DirectAgent\(autoSelectFamily=true,autoSelectFamilyAttemptTimeout=250\)/);
+});
+
+test('createWarframeDispatcher：无代理 -> 直连 Agent；有代理 -> ProxyAgent', () => {
+  const direct = createWarframeDispatcher(null);
+  assert.equal(direct.constructor.name, 'Agent');
+  assert.equal(isProxyDispatcher(direct), false);
+
+  const proxied = createWarframeDispatcher('http://127.0.0.1:7890');
+  assert.equal(proxied.constructor.name, 'ProxyAgent');
+  assert.equal(isProxyDispatcher(proxied), true);
+  assert.match(describeDispatcherKind(proxied), /ProxyAgent/);
 });
 
 test('buildFissureProviderBundle 不需要 TARGET_QQ（check 模式）且同样隔离代理', async () => {

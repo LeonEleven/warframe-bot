@@ -2,7 +2,7 @@
  * 程序入口：加载配置 -> 获取单实例锁 -> 加载状态 -> 顺序轮询（带心跳与优雅退出）。
  */
 
-import { buildRuntime } from './app.js';
+import { buildRuntime, type MonitorRuntime } from './app.js';
 import { describeConfig, loadConfig } from './config.js';
 import { applyPollOutcome, createMonitorStats, Heartbeat } from './heartbeat.js';
 import { InstanceAlreadyRunningError, SingleInstanceLock } from './lock.js';
@@ -10,6 +10,7 @@ import { createLogger, describeError } from './logger.js';
 import { runPollCycle } from './poller.js';
 import { runMonitorLoop } from './runner.js';
 import { StateStore } from './state/store.js';
+import { closeDispatcher } from './warframe/proxy.js';
 
 async function main(): Promise<void> {
   const config = loadConfig({ requireTargetQq: true });
@@ -36,11 +37,15 @@ async function main(): Promise<void> {
 
   const detachExitHandler = lock.attachExitHandler();
 
+  // 需要在 finally 里优雅关闭 Warframe dispatcher，因此在 try 之外声明
+  let runtime: MonitorRuntime | undefined;
+
   try {
     const store = await StateStore.load({ filePath: config.stateFile, logger });
-    const runtime = buildRuntime({ config, logger });
+    const monitorRuntime = buildRuntime({ config, logger });
+    runtime = monitorRuntime;
     const heartbeat = new Heartbeat({ intervalMs: config.heartbeatIntervalMs, logger });
-    const stats = createMonitorStats(runtime.provider.name);
+    const stats = createMonitorStats(monitorRuntime.provider.name);
 
     const controller = new AbortController();
     const shutdown = (signal: NodeJS.Signals): void => {
@@ -54,10 +59,11 @@ async function main(): Promise<void> {
     logger.info('Warframe 裂缝监控启动', {
       ...describeConfig(config),
       lockPid: lock.info.pid,
-      proxy: runtime.proxyDescription,
+      proxy: monitorRuntime.proxyDescription,
+      warframeDispatcher: monitorRuntime.dispatcherKind,
     });
     logger.info(
-      `数据源: ${runtime.provider.name}；已加载 ${store.size} 条历史通知记录（来自 ${config.stateFile}）`,
+      `数据源: ${monitorRuntime.provider.name}；已加载 ${store.size} 条历史通知记录（来自 ${config.stateFile}）`,
     );
     if (config.dryRun) {
       logger.warn('DRY_RUN=true：只检测并打印，不会真正发送 QQ 消息');
@@ -73,11 +79,11 @@ async function main(): Promise<void> {
           store,
           dryRun: config.dryRun,
           fetchFissures: async () => {
-            const result = await runtime.provider.fetchFissures();
+            const result = await monitorRuntime.provider.fetchFissures();
             stats.provider = result.provider;
             return result.fissures;
           },
-          sendMessage: (message) => runtime.napcat.sendPrivateMessage(runtime.targetQq, message),
+          sendMessage: (message) => monitorRuntime.napcat.sendPrivateMessage(monitorRuntime.targetQq, message),
         });
 
         // 统计语义：只有 provider 获取失败才算「本轮出错」；
@@ -95,6 +101,8 @@ async function main(): Promise<void> {
   } finally {
     await lock.release();
     detachExitHandler();
+    // 优雅关闭 Warframe 专用 dispatcher（直连 Agent / ProxyAgent 复用了整个进程生命周期）
+    await closeDispatcher(runtime?.dispatcher, logger);
   }
 }
 

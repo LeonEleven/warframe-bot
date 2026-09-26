@@ -53,11 +53,25 @@ async function buildAutoProvider(options: {
       : new Response('blocked', { status: 403 });
   });
 
-  const official = new OfficialWorldStateProvider({ url: officialUrl, timeoutMs: 5_000, fetchImpl: stub.fetch, logger: options.logger });
-  const warframestat = new WarframeStatProvider({ url: warframestatUrl, timeoutMs: 5_000, fetchImpl: stub.fetch, logger: options.logger });
+  // 测试里用 fake sleep，避免真的等待 HTTP 重试退避（1s + 3s）
+  const noSleep = async (): Promise<void> => {};
+  const official = new OfficialWorldStateProvider({
+    url: officialUrl,
+    timeoutMs: 5_000,
+    fetchImpl: stub.fetch,
+    sleep: noSleep,
+    logger: options.logger,
+  });
+  const warframestat = new WarframeStatProvider({
+    url: warframestatUrl,
+    timeoutMs: 5_000,
+    fetchImpl: stub.fetch,
+    sleep: noSleep,
+    logger: options.logger,
+  });
   const provider = createFissureProvider({ source: 'auto', official, warframestat, logger: options.logger });
 
-  return { provider, stub };
+  return { provider, stub, officialUrl, warframestatUrl };
 }
 
 test('createFissureProvider 按 WARFRAME_SOURCE 选择数据源', () => {
@@ -88,17 +102,28 @@ test('auto：official 成功时绝不请求 fallback provider', async () => {
 
 test('auto：official 失败时回退到 warframestat 并记录 warn 日志', async () => {
   const logger = createMemoryLogger();
-  const { provider, stub } = await buildAutoProvider({ officialWorks: false, warframestatWorks: true, logger });
+  const { provider, stub, officialUrl, warframestatUrl } = await buildAutoProvider({
+    officialWorks: false,
+    warframestatWorks: true,
+    logger,
+  });
 
   const result = await provider.fetchFissures();
 
   assert.equal(result.provider, 'warframestat');
   assert.equal(result.fissures.length, 1);
-  assert.deepEqual(stub.urls(), [
-    'https://api.warframe.com/cdn/worldState.php',
-    'https://api.warframestat.us/pc/fissures?language=en',
-  ]);
-  assert.ok(logger.text().includes('official 获取失败 -> fallback 到 warframestat'));
+  // official 先完成自己的有限重试（502 属于可重试状态，默认 3 次尝试），全部失败后才 fallback
+  assert.deepEqual(stub.urls(), [officialUrl, officialUrl, officialUrl, warframestatUrl]);
+  assert.ok(
+    logger.text().includes('official 获取失败 -> fallback 到 warframestat'),
+    '应在 official 重试耗尽后才记录 fallback',
+  );
+  const retryWarnings = logger.records.filter(
+    (record) => record.level === 'warn' && record.message.includes('Warframe 请求失败，准备重试'),
+  );
+  assert.equal(retryWarnings.length, 2, 'official 的两次中间失败应各记一条 WARN');
+  assert.ok(retryWarnings[0]?.message.includes('attempt=1/3'));
+  assert.ok(retryWarnings[1]?.message.includes('attempt=2/3'));
 });
 
 test('auto：两个 provider 都失败时抛出 ProviderError(kind=unavailable) 且聚合两边原因', async () => {

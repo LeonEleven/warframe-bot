@@ -113,16 +113,27 @@ test('official provider 请求失败 -> ProviderError(kind=request)', async () =
   );
 });
 
-test('official provider HTTP 500 -> ProviderError(kind=request)', async () => {
+test('official provider HTTP 500 -> ProviderError(kind=request)，且 5xx 会有限重试', async () => {
   const stub = createFetchStub(() => new Response('boom', { status: 500 }));
-  const provider = new OfficialWorldStateProvider({ timeoutMs: 5_000, fetchImpl: stub.fetch });
+  const delays: number[] = [];
+  const provider = new OfficialWorldStateProvider({
+    timeoutMs: 5_000,
+    fetchImpl: stub.fetch,
+    sleep: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+  });
 
   await assert.rejects(() => provider.fetchFissures(), (error: unknown) => {
     assert.ok(error instanceof ProviderError);
     assert.equal(error.kind, 'request');
     assert.match(error.message, /HTTP 500/);
+    assert.match(error.message, /attempt=3\/3/);
     return true;
   });
+
+  assert.equal(stub.calls.length, 3, '5xx 应重试到上限');
+  assert.deepEqual(delays, [1_000, 3_000], '退避应为 1s / 3s');
 });
 
 test('响应被网关拦截（HTML 而非 JSON）-> ProviderError(kind=parse)', async () => {

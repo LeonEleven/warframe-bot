@@ -34,11 +34,21 @@ function toText(value: unknown): string {
   }
 }
 
-/** 把任意异常转成可读文本（包含 Error.cause 链）。 */
+/**
+ * 把任意异常转成可读文本（包含 Error.cause 链，并带上 code 便于诊断网络故障）。
+ *
+ * 例：`TypeError: fetch failed <- ConnectTimeoutError (code=UND_ERR_CONNECT_TIMEOUT): Connect Timeout Error`
+ * 只输出 name / code / message，不包含任何凭据；URL 由调用方自行脱敏。
+ */
 export function describeError(error: unknown): string {
   if (error instanceof Error) {
+    const code: unknown = (error as { code?: unknown }).code;
+    const codeText =
+      typeof code === 'string' ? code : typeof code === 'number' && Number.isFinite(code) ? String(code) : '';
+    const codePart = codeText === '' ? '' : ` (code=${codeText})`;
+
     const cause: unknown = (error as { cause?: unknown }).cause;
-    const base = `${error.name}: ${error.message}`;
+    const base = `${error.name}${codePart}: ${error.message}`;
     return cause === undefined ? base : `${base} <- ${describeError(cause)}`;
   }
   return toText(error);
